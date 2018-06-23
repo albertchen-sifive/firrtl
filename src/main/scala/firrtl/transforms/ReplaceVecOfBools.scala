@@ -10,71 +10,159 @@ import scala.collection.mutable
 
 object ReplaceVecOfBools {
 
-  private val replacedVecs = new mutable.HashMap[String, (Type, String)]()
+  private val replacedVecs = new mutable.HashMap[String, Expression]()
   private val inputs = new mutable.HashSet[String]()
 
-  private def boolToUInt(name: String)(tpe: Type): Type = {
+  private val fieldDelimeter = '.'
+
+  private def replaceAndRegister(name: String, isInput: Boolean = true, isPort: Boolean = false)(tpe: Type): Type = {
     tpe match {
       case VectorType(BoolType, size) =>
-        val uintType = UIntType(IntWidth(size))
-        replacedVecs.put(name, (uintType, name))
-        uintType
+        if (isPort && isInput) {
+          inputs.add(name)
+          replacedVecs.put(name, keyToExpr(name).mapType(_ => UIntType(IntWidth(size))))
+        } else {
+          replacedVecs.put(name, UIntLiteral(0, IntWidth(size)))
+        }
+        UIntType(IntWidth(size))
+      case BundleType(fields) => BundleType(fields.map { case field =>
+        field.copy(tpe = replaceAndRegister(name + fieldDelimeter + field.name,
+          isInput ^ field.flip == Flip,
+          isPort)(field.tpe))
+      })
       case other => other
     }
   }
 
+  private def boolVecToUInt(tpe: Type): Type = {
+    tpe match {
+      case VectorType(BoolType, size) => UIntType(IntWidth(size))
+      case BundleType(fields) => BundleType(fields.map(field => field.copy(tpe = boolVecToUInt(field.tpe))))
+      case other => other
+    }
+  }
+
+  private def isReplaced(expr: Expression): Boolean = expr match {
+    case WRef(name, _, _, _) => replacedVecs.contains(name)
+    case WSubField(WRef(instanceName, _, _, _), fieldName, _, _) =>
+      replacedVecs.contains(instanceName + fieldDelimeter + fieldName)
+    case _ => false
+  }
+
+  private def getDefault(expr: Expression, suffix: String = ""): Expression = expr match {
+    case wRef: WRef => replacedVecs(wRef.name + suffix)
+    case WSubField(WRef(name, _, _, _), fieldName, _, _) => replacedVecs(name + fieldDelimeter + fieldName)
+    case WSubField(bundle, fieldName, _, _) => getDefault(bundle, fieldName + fieldName + suffix)
+  }
+
+  private def setDefault(expr: Expression, default: Expression, suffix: String = ""): Unit = expr match {
+    case wRef: WRef => replacedVecs.put(wRef.name + suffix, default)
+    case WSubField(WRef(name, _, _, _), fieldName, _, _) => replacedVecs.put(name + fieldDelimeter + fieldName, default)
+    case WSubField(bundle, fieldName, _, _) => setDefault(bundle, default, fieldName + fieldDelimeter + suffix)
+  }
+
+  private def assignVec(info: Info, namespace: Namespace, origExpr: Expression, value: Expression): DefNode = {
+    val default = getDefault(origExpr)
+    val tempName = namespace.newName("temp")
+    setDefault(origExpr, WRef(tempName, default.tpe))
+    DefNode(info, tempName, value)
+  }
+
   private def onStmt(namespace: Namespace)(stmt: Statement): Statement = stmt match {
-    case DefWire(info, origName, origTpe@VectorType(BoolType, _)) =>
-      val tempName = namespace.newName(origName)
-      val tpe = boolToUInt(origName)(origTpe)
-      val wire = DefWire(info, origName, tpe)
-      replacedVecs.put(origName, (tpe, tempName))
-      Block(Seq(DefNode(wire.info, tempName, zero), wire))
-    case DefRegister(info, origName, origTpe@VectorType(BoolType, _), clock, reset, init) =>
-      val tempName = namespace.newName(origName)
-      val tpe = boolToUInt(origName)(origTpe)
-      val reg = DefRegister(info, origName, tpe, clock, reset, init)
-      replacedVecs.put(origName, (tpe, tempName))
-      Block(Seq(DefNode(reg.info, tempName, zero), reg))
 
-    // replace connects to SubAccess/Index to simple wires
-    case Connect(info, WSubAccess(WRef(origName, _, _, _), origIndex, _, _), origExpr) if
-    replacedVecs.contains(origName) => replaceSubAccessConnect(namespace, info, origName, origIndex, origExpr)
-    case Connect(info, WSubIndex(WRef(origName, _, _, _), value, _, _), origExpr) if
-    replacedVecs.contains(origName) => replaceSubIndexConnect(namespace, info, origName, value, origExpr)
+    case wire: DefWire => wire.mapType(replaceAndRegister(wire.name))
+    case reg: DefRegister => reg.mapType(replaceAndRegister(reg.name))
 
-    // replace connects to SubAccess/Index to module ports
-    case Connect(connectInfo,
-    WSubAccess(WSubField(WRef(instanceName, _, _, _), fieldName, _, _), origIndex, _, _),
-    origExpr) if replacedVecs.contains(instanceName + fieldName) =>
-      val origName = instanceName + fieldName
-      replaceSubAccessConnect(namespace, connectInfo, origName, origIndex, origExpr)
-    case Connect(info,
-    WSubIndex(WSubField(WRef(instanceName, _, _, _), fieldName, _, _), value, _, _),
-    origExpr) if replacedVecs.contains(instanceName + fieldName) =>
-      val origName = instanceName + fieldName
-      replaceSubIndexConnect(namespace, info, origName, value, origExpr)
+    case Connect(info, WSubIndex(wRef, index, _, _), origValue) if isReplaced(wRef) =>
+      val default = getDefault(wRef)
+      val value = onExpr(namespace)(origValue)
+      val tpe = default.tpe
+
+      val shiftedValue = DoPrim(PrimOps.Shl, Seq(value), Seq(index), default.tpe)
+
+      val UIntType(IntWidth(width)) = default.tpe
+      val oneHot = DoPrim(PrimOps.Shl, Seq(UIntLiteral(1, IntWidth(width))), Seq(index), tpe)
+      val mask = DoPrim(PrimOps.Not, Seq(oneHot), Seq.empty, tpe)
+      val maskedDefault = DoPrim(PrimOps.And, Seq(default, mask), Seq.empty, tpe)
+
+      assignVec(info, namespace, wRef, DoPrim(PrimOps.Or, Seq(maskedDefault, shiftedValue), Seq.empty, tpe))
+
+    case Connect(info, WSubAccess(wRef, origIndex, _, _), origValue) if isReplaced(wRef) =>
+      val default = getDefault(wRef)
+      val value = onExpr(namespace)(origValue)
+      val index = onExpr(namespace)(origIndex)
+      val tpe = default.tpe
+
+      val shiftedValue = DoPrim(PrimOps.Dshl, Seq(value, index), Seq.empty, default.tpe)
+
+      val UIntType(IntWidth(width)) = default.tpe
+      val oneHot = DoPrim(PrimOps.Dshl, Seq(UIntLiteral(1, IntWidth(width)), index), Seq.empty, tpe)
+      val mask = DoPrim(PrimOps.Not, Seq(oneHot), Seq.empty, tpe)
+      val maskedDefault = DoPrim(PrimOps.And, Seq(default, mask), Seq.empty, tpe)
+
+      assignVec(info, namespace, wRef, DoPrim(PrimOps.Or, Seq(maskedDefault, shiftedValue), Seq.empty, tpe))
 
     // replace full connects to simple wires
-    case Connect(info, WRef(origName, _, _, _), value) if replacedVecs.contains(origName) =>
-      val tempName = namespace.newName(origName)
-      val tpe = replacedVecs(origName)._1
-      replacedVecs.put(origName, (tpe, tempName))
-      DefNode(info, tempName, value)
+    case Connect(info, expr, value) if isReplaced(expr) => assignVec(info, namespace, expr, onExpr(namespace)(value))
+
+    // add temporary wires for module ports that have been replaced
+    case wDefInstance: WDefInstance => wDefInstance.mapType(replaceAndRegister(wDefInstance.name, true, true))
+
+    case Conditionally(info, origCond, origConseq, origAlt) =>
+      val replacedVecsCopy = replacedVecs.clone()
+      val replacedVecsDefaults = replacedVecs.clone().map { case (name, wRef) =>
+        (name, WRef(namespace.newName("temp"), getDefault(keyToExpr(name)).tpe))
+      }
+
+      val defaults = replacedVecsDefaults.filter {
+        case (name, _) => !inputs.contains(name)
+      }.flatMap {
+        case (name, prevDefault @ WRef(tempName, tpe, _, _)) =>
+          val wire = DefWire(info, tempName, UIntType(UnknownWidth))
+          Seq(wire, Connect(info, prevDefault, replacedVecs(name)))
+      }.toSeq
+      val cond = onExpr(namespace)(origCond)
+
+      val conseq = Block(Seq(onStmt(namespace)(origConseq)) ++
+        replacedVecsDefaults.filter {
+          case (name, _) => !inputs.contains(name)
+        }.map { case (origName, prevDefault) => Connect(info, prevDefault, replacedVecs(origName)) })
+      replacedVecs ++= replacedVecsCopy
+
+      val alt = Block(Seq(onStmt(namespace)(origAlt)) ++
+        replacedVecsDefaults.filter {
+          case (name, _) => !inputs.contains(name)
+        }.map { case (origName, wref) => Connect(info, wref, replacedVecs(origName)) })
+      replacedVecs ++= replacedVecsDefaults
+
+      val conditional = Conditionally(info, cond, conseq, alt)
+      Block(defaults :+ conditional)
+
+/*
+    // replace connects to SubAccess/Index to module ports
+    case Connect(connectInfo,
+    WSubAccess(wSubField @ WSubField(WRef(instanceName, _, _, _), fieldName, _, _), origIndex, _, _),
+    origExpr) if isReplaced(wSubField) =>
+      val origName = instanceName + "_" + fieldName
+      replaceSubAccessConnect(namespace, connectInfo, origName, origIndex, origExpr)
+    case Connect(info,
+    WSubIndex(wSubField @ WSubField(WRef(instanceName, _, _, _), fieldName, _, _), value, _, _),
+    origExpr) if isReplaced(wSubField) =>
+      val origName = instanceName + "_" + fieldName
+      replaceSubIndexConnect(namespace, info, origName, value, origExpr)
 
     // replace full connects to module ports
-    case Connect(info, WSubField(WRef(instanceName, _, _, _), fieldName, _, _), value) if
-    replacedVecs.contains(instanceName + fieldName) =>
-      val origName = instanceName + fieldName
-      val tempName = namespace.newName(instanceName + fieldName)
-      val tpe = replacedVecs(origName)._1
-      replacedVecs.put(origName, (tpe, tempName))
-      DefNode(info, tempName, value)
+    case Connect(info, wSubField @ WSubField(WRef(instanceName, _, _, _), fieldName, _, _), value) if
+    isReplaced(wSubField) =>
+      val origName = instanceName + fieldDelimeter + fieldName
+      val tempName = namespace.newName(instanceName + "_" + fieldName)
+      val tpe = getDefault(wSubField).tpe
+      reassignVec(info, origName, value, tempName, tpe)
 
     // add temporary wires for module ports that have been replaced
     case WDefInstance(info, instanceName, module, BundleType(fields)) =>
       val newFields = fields.map { case Field(fieldName, orientation, tpe) =>
-        Field(fieldName, orientation, boolToUInt(instanceName + fieldName)(tpe))
+        Field(fieldName, orientation, replaceAndRegister(instanceName + fieldDelimeter + fieldName)(tpe))
       }
 
       val newBundleType = BundleType(newFields)
@@ -86,129 +174,65 @@ object ReplaceVecOfBools {
           val name = namespace.newName(instanceName + fieldName)
           val tpe = UIntType(IntWidth(size))
           val subField = WSubField(WRef(instanceName, newBundleType), fieldName, tpe)
-          replacedVecs.put(instanceName + fieldName, (tpe, name))
+          replacedVecs.put(instanceName + fieldName, WRef(name, tpe))
           if (orientation == Flip) {
             val tempName = namespace.newName(instanceName + fieldName)
-            replacedVecs.put(name, (tpe, tempName))
-            Block(Seq(DefNode(info, tempName, zero),
+            Block(Seq(reassignVec(info, name, zero, tempName, tpe),
               DefWire(info, name, tpe),
               Connect(info, subField, WRef(name, tpe))))
           } else {
             val tempName = namespace.newName(instanceName + fieldName)
-            replacedVecs.put(name, (tpe, tempName))
-            Block(Seq(DefNode(info, tempName, subField),
+            Block(Seq(reassignVec(info, name, subField, tempName, tpe),
               DefWire(info, name, tpe),
               Connect(info, WRef(name, tpe), WRef(tempName, tpe))))
           }
       }
 
       Block(Seq(WDefInstance(info, instanceName, module, newBundleType)) ++ instanceWires)
-    case Conditionally(info, origCond, origConseq, origAlt) => {
+
+    case Conditionally(info, origCond, origConseq, origAlt) =>
       val replacedVecsCopy = replacedVecs.clone()
-      val replacedVecsDefaults = replacedVecs.clone().map { case (name, (tpe, tempName)) =>
-        (name, (tpe, namespace.newName(name)))
+      val replacedVecsDefaults = replacedVecs.clone().map { case (name, wRef) =>
+        (name, wRef.copy(name = namespace.newName(name)))
       }
 
       val defaults = replacedVecsDefaults.filter {
         case (name, _) => !inputs.contains(name)
       }.flatMap {
-        case (name, (tpe, tempName)) =>
+        case (name, prevDefault @ WRef(tempName, tpe, _, _)) =>
           val wire = DefWire(info, tempName, tpe)
-          Seq(wire, Connect(info, WRef(tempName, tpe), WRef(replacedVecs(name)._2, tpe)))
+          Seq(wire, Connect(info, prevDefault, replacedVecs(name)))
       }.toSeq
       val cond = onExpr(namespace)(origCond)
 
       val conseq = Block(Seq(onStmt(namespace)(origConseq)) ++
         replacedVecsDefaults.filter {
           case (name, _) => !inputs.contains(name)
-        }.map { case (origName, (tpe, tempName)) =>
-          Connect(info, WRef(tempName, tpe), WRef(replacedVecs(origName)._2, tpe))
-        })
+        }.map { case (origName, prevDefault) => Connect(info, prevDefault, replacedVecs(origName)) })
       replacedVecs ++= replacedVecsCopy
 
       val alt = Block(Seq(onStmt(namespace)(origAlt)) ++
         replacedVecsDefaults.filter {
           case (name, _) => !inputs.contains(name)
-        }.map {
-          case (origName, (tpe, tempName)) =>
-            Connect(info, WRef(tempName, tpe), WRef(replacedVecs(origName)._2, tpe))
-        })
+        }.map { case (origName, wref) => Connect(info, wref, replacedVecs(origName)) })
       replacedVecs ++= replacedVecsDefaults
 
       val conditional = Conditionally(info, cond, conseq, alt)
       Block(defaults :+ conditional)
-    }
+      */
     case other => other.mapStmt(onStmt(namespace)).mapExpr(onExpr(namespace))
   }
 
-  private def replaceSubIndexConnect(namespace: Namespace,
-                                     info: Info,
-                                     origName: String,
-                                     value: Int,
-                                     origExpr: Expression) = {
-    val expr = onExpr(namespace)(origExpr)
-
-    val (tpe, name) = replacedVecs(origName)
-
-    val replacedVec = WRef(name, tpe)
-    val tempWireName = namespace.newName(origName)
-    replacedVecs.put(origName, (tpe, tempWireName))
-
-    val shiftedValue = DoPrim(PrimOps.Shl, Seq(expr), Seq(value), tpe)
-
-    val UIntType(IntWidth(width)) = tpe
-    val oneHot = DoPrim(PrimOps.Shl, Seq(DoPrim(PrimOps.Pad, Seq(one), Seq(width), tpe)), Seq(value), tpe)
-    val mask = DoPrim(PrimOps.Not, Seq(oneHot), Seq.empty, tpe)
-    val maskedUInt = DoPrim(PrimOps.And, Seq(replacedVec, mask), Seq.empty, tpe)
-
-    DefNode(info, tempWireName, DoPrim(PrimOps.Or, Seq(maskedUInt, shiftedValue), Seq.empty, tpe))
-  }
-
-  private def replaceSubAccessConnect(namespace: Namespace,
-                                      info: Info,
-                                      origName: String,
-                                      origIndex: Expression,
-                                      origExpr: Expression) = {
-    val index = onExpr(namespace)(origIndex)
-    val expr = onExpr(namespace)(origExpr)
-
-    val (tpe, name) = replacedVecs(origName)
-
-    val replacedVec = WRef(name, tpe)
-    val tempWireName = namespace.newName(origName)
-    replacedVecs.put(origName, (tpe, tempWireName))
-
-    val shiftedValue = DoPrim(PrimOps.Dshl, Seq(expr, index), Seq.empty, tpe)
-
-    val UIntType(IntWidth(width)) = tpe
-    val oneHot = DoPrim(PrimOps.Dshl, Seq(DoPrim(PrimOps.Pad, Seq(one), Seq(width), tpe), index), Seq.empty, tpe)
-    val mask = DoPrim(PrimOps.Not, Seq(oneHot), Seq.empty, tpe)
-    val maskedUInt = DoPrim(PrimOps.And, Seq(replacedVec, mask), Seq.empty, tpe)
-
-    DefNode(info, tempWireName, DoPrim(PrimOps.Or, Seq(maskedUInt, shiftedValue), Seq.empty, tpe))
-  }
-
   private def onExpr(namespace: Namespace)(expr: Expression): Expression = expr match {
-    case WSubIndex(WRef(origName, _, _, _), value, _, _) if replacedVecs.contains(origName) =>
-      val (tpe, name) = replacedVecs(origName)
-      DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Shr, Seq(WRef(name, tpe)), Seq(value), tpe)), Seq(0, 0), BoolType)
-    case WSubAccess(WRef(origName, _, _, _), origIndex, _, _) if replacedVecs.contains(origName) =>
+    case WSubIndex(vec, value, _, _) if isReplaced(vec) =>
+      val wRef = getDefault(vec)
+      DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Shr, Seq(wRef), Seq(value), wRef.tpe)), Seq(0, 0), BoolType)
+    case WSubAccess(vec, origIndex, _, _) if isReplaced(vec) =>
       val index = onExpr(namespace)(origIndex)
-      val (tpe, name) = replacedVecs(origName)
-      DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Dshr, Seq(WRef(name, tpe), index), Seq.empty, tpe)), Seq(0, 0), BoolType)
-    case WSubIndex(WSubField(WRef(instanceName, _, _, _), fieldName, _, _), value, _, _) if
-    replacedVecs.contains(instanceName + fieldName) =>
-      val (tpe, name) = replacedVecs(instanceName + fieldName)
-      DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Shr, Seq(WRef(name, tpe)), Seq(value), tpe)), Seq(0, 0), BoolType)
-    case WSubAccess(WSubField(WRef(instanceName, _, _, _), fieldName, _, _), origIndex, _, _) if
-    replacedVecs.contains(instanceName + fieldName) =>
-      val index = onExpr(namespace)(origIndex)
-      val (tpe, name) = replacedVecs(instanceName + fieldName)
-      DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Dshr, Seq(WRef(name, tpe), index), Seq.empty, tpe)), Seq(0, 0), BoolType)
-    case WRef(name, _, _, _) if replacedVecs.contains(name) =>
-      WRef(replacedVecs(name)._2, replacedVecs(name)._1)
-    case other =>
-      other.mapExpr(onExpr(namespace))
+      val wRef = getDefault(vec)
+      DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Dshr, Seq(wRef, index), Seq.empty, wRef.tpe)), Seq(0, 0), BoolType)
+    case wRef: WRef if isReplaced(wRef) => getDefault(wRef)
+    case other => other.mapExpr(onExpr(namespace))
   }
 
   /** Replace Vec of Bools
@@ -225,20 +249,14 @@ object ReplaceVecOfBools {
 
     val outputDefaults = new mutable.ListBuffer[Statement]()
     val ports = mod.ports.map({ case Port(info, name, direction, origTpe) =>
-      val tpe = boolToUInt(name)(origTpe)
-      if (direction == Input) {
-        inputs.add(name)
-      } else if (tpe != origTpe) {
-        val tempName = namespace.newName(name)
-        outputDefaults.prepend(DefNode(info, tempName, zero))
-        replacedVecs.put(name, (tpe, tempName))
-      }
+      val tpe = replaceAndRegister(name, direction == Input, true)(origTpe)
       Port(info, name, direction, tpe)
     })
 
     val bodyx = onStmt(namespace)(mod.body)
-    val finalConnects = replacedVecs.filter(i => !inputs.contains(i._1)).map {
-      case (origName, (tpe, tempName)) => Connect(NoInfo, WRef(origName, tpe), WRef(tempName, tpe))
+
+    val finalConnects = replacedVecs.filterKeys(!inputs.contains(_)).map {
+      case (origName, wRef) => Connect(NoInfo, keyToExpr(origName), wRef)
     }.toSeq
 
     replacedVecs.clear()
@@ -246,26 +264,13 @@ object ReplaceVecOfBools {
 
     mod.copy(ports = ports, body = Block(Block(outputDefaults) +: bodyx +: finalConnects))
   }
+
+  private def keyToExpr(name: String): Expression = {
+    val path = name.split('.')
+    val bundleRef: Expression = WRef(path.head, UIntType(UnknownWidth))
+    path.tail.foldRight(bundleRef)( (field, expr) => WSubField(expr, field) )
+  }
 }
-
-/*
-  what to use for default for inputs of module instances?
-  multiple passes: first pass to collect index accesses, second to cat them together?
-
-    inst myDummy of Top1 @[:testNestedModules1.fir@27.4]
-    wire myDummyboolVec : UInt<8> @[:testNestedModules1.fir@27.4]
-    myDummy.boolVec <= myDummyboolVec @[:testNestedModules1.fir@27.4]
-    myDummy.select <= select @[:testNestedModules1.fir@28.4]
-    node myDummyboolVec_0 = or(and(myDummyboolVec, not(shl(pad(UInt<1>("h1"), 8), 0))), shl(bits(boolVec, 0, 0), 0)) @[:testNestedModules1.fir@29.4]
-    node myDummyboolVec_1 = or(and(myDummyboolVec_0, not(shl(pad(UInt<1>("h1"), 8), 1))), shl(bits(boolVec, 1, 1), 1)) @[:testNestedModules1.fir@30.4]
-    node myDummyboolVec_2 = or(and(myDummyboolVec_1, not(shl(pad(UInt<1>("h1"), 8), 2))), shl(bits(boolVec, 2, 2), 2)) @[:testNestedModules1.fir@31.4]
-    node myDummyboolVec_3 = or(and(myDummyboolVec_2, not(shl(pad(UInt<1>("h1"), 8), 3))), shl(bits(boolVec, 3, 3), 3)) @[:testNestedModules1.fir@32.4]
-    node myDummyboolVec_4 = or(and(myDummyboolVec_3, not(shl(pad(UInt<1>("h1"), 8), 4))), shl(bits(boolVec, 4, 4), 4)) @[:testNestedModules1.fir@33.4]
-    node myDummyboolVec_5 = or(and(myDummyboolVec_4, not(shl(pad(UInt<1>("h1"), 8), 5))), shl(bits(boolVec, 5, 5), 5)) @[:testNestedModules1.fir@34.4]
-    node myDummyboolVec_6 = or(and(myDummyboolVec_5, not(shl(pad(UInt<1>("h1"), 8), 6))), shl(bits(boolVec, 6, 6), 6)) @[:testNestedModules1.fir@35.4]
-    node myDummyboolVec_7 = or(and(myDummyboolVec_6, not(shl(pad(UInt<1>("h1"), 8), 7))), shl(bits(boolVec, 7, 7), 7)) @[:testNestedModules1.fir@36.4]
-    myDummyboolVec <= myDummyboolVec_7
- */
 
 /** Replace Vec of Bools
   *
@@ -273,7 +278,6 @@ object ReplaceVecOfBools {
   */
 class ReplaceVecOfBools extends Transform {
   def inputForm = HighForm
-
   def outputForm = HighForm
 
   def execute(state: CircuitState): CircuitState = {
