@@ -48,10 +48,6 @@ object ReplaceVecOfBools {
   }
 
   private def vecToUInt(value: Expression): Expression = {
-    assert(assertion = value.tpe match {
-      case VectorType(BoolType, _) => true
-      case _ => false
-    }, value.tpe.serialize)
     val VectorType(BoolType, size) = value.tpe
     val firstBit: Expression = SubIndex(value, 0, BoolType)
     (1 until size).foldLeft(firstBit)((expr, i) =>
@@ -90,6 +86,22 @@ object ReplaceVecOfBools {
     val maskedDefault = DoPrim(PrimOps.And, Seq(default, mask), Seq.empty, tpe)
 
     assignVec(info, namespace, vec, DoPrim(PrimOps.Or, Seq(maskedDefault, shiftedValue), Seq.empty, tpe))
+  }
+
+  private def enterScope(info: Info, namespace: Namespace) = {
+    val prevDefaults = candidates.clone()
+
+    // create new wires for conditional assignments
+    val conditionalDefaults = prevDefaults.filter { case (name, _) => !inputs.contains(name) }.map {
+      case (name, _) => (name, (WRef(namespace.newTemp, getDefault(keyToExpr(name)).tpe), false))
+    }
+
+    // assign new wires to current default before conditional
+    val defaults = conditionalDefaults.flatMap {
+      case (name, (prevDefault, _)) =>
+        val wire = DefWire(info, prevDefault.name, prevDefault.tpe)
+        Seq(wire, Connect(info, prevDefault, candidates(name)._1))
+    }.toSeq
   }
 
   private def onStmt(namespace: Namespace)(stmt: Statement): Statement = stmt match {
@@ -162,7 +174,7 @@ object ReplaceVecOfBools {
           Seq(wire, Connect(info, prevDefault, candidates(name)._1))
       }.toSeq
 
-      // reset touched flags
+      // reset flags
       candidates.foreach{ case (k, (e, _)) => candidates.put(k, (e, false))}
 
       // map conseq with new defaults, reassign newly created wires, then reset defaults
@@ -243,7 +255,7 @@ object ReplaceVecOfBools {
 
   /** Replace Vec of Bools
     *
-    * Finds and replaces all wire or register declarations of type Vec of bool
+    * Finds and replaces wire or register declarations of type Vec of bool
     * with a UInt of the same length. SubAccess/SubIndex nodes are replaced
     * with equivalent bitwise operations.
     *
