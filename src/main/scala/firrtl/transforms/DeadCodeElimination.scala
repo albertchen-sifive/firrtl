@@ -303,7 +303,7 @@ class DeadCodeElimination extends Transform {
     val renames = RenameMap()
     renames.setCircuit(c.main)
 
-    // As we delete deadCode, we will delete ports from Modules and somtimes complete modules
+    // As we delete deadCode, we will delete ports from Modules and sometimes complete modules
     // themselves. We iterate over the modules in a topological order from leaves to the top. The
     // current status of the modulesxMap is used to either delete instances or update their types
     val modulesxMap = mutable.HashMap.empty[String, DefModule]
