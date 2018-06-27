@@ -14,6 +14,7 @@ object ReplaceVecOfBools {
   private val inputs = new mutable.HashSet[String]()
 
   private val fieldDelimeter = '.'
+  private var badModules = new mutable.HashSet[String]()
 
   private def replaceAndRegister(name: String,
                                  isInput: Boolean = true,
@@ -108,12 +109,12 @@ object ReplaceVecOfBools {
     case wire: DefWire => wire.mapType(replaceAndRegister(wire.name))
     case reg: DefRegister => reg.mapExpr(onExpr(namespace)).mapType(replaceAndRegister(reg.name))
     case node @ DefNode(_, name, origValue) =>
-      val value = onExpr(namespace)(origValue)
+      val valuex = onExpr(namespace)(origValue)
       replaceAndRegister(name, isInput = true, hasDirection = true)(origValue.tpe)
-      if (isReplaced(WRef(name)) && value.tpe != getDefault(WRef(name)).tpe) {
-        node.copy(value = vecToUInt(value))
+      if (isReplaced(WRef(name)) && valuex.tpe != getDefault(WRef(name)).tpe) {
+        node.copy(value = vecToUInt(valuex))
       } else {
-        node.copy(value = value)
+        node.copy(value = valuex)
       }
 
     case PartialConnect(info, WSubIndex(vec, index, _, _), origValue) if isReplaced(vec) =>
@@ -155,7 +156,7 @@ object ReplaceVecOfBools {
         i => Connect(info, SubIndex(expr, i, BoolType), onExpr(namespace)(SubIndex(value, i, BoolType))))
       Block(connects)
 
-    case wDefInstance: WDefInstance =>
+    case wDefInstance: WDefInstance if !badModules.contains(wDefInstance.module) =>
       wDefInstance.mapType(replaceAndRegister(wDefInstance.name, isInput = true, hasDirection = true))
 
     case Conditionally(info, origCond, origConseq, origAlt) =>
@@ -262,11 +263,12 @@ object ReplaceVecOfBools {
     * @param mod [[Module]] to transform
     * @return [[Module]] with bool vecs replaced
     */
-  def replaceVecOfBools(mod: Module): DefModule = {
+  def replaceVecOfBools(mod: Module, badModulesx: mutable.HashSet[String]): DefModule = {
     val namespace = Namespace(mod)
+    badModules = badModulesx
 
     val outputDefaults = new mutable.ListBuffer[Statement]()
-    val ports = mod.ports.map({ case Port(info, name, direction, origTpe) =>
+    val portsx = mod.ports.map({ case Port(info, name, direction, origTpe) =>
       val tpe = replaceAndRegister(name, direction == Input, hasDirection = true)(origTpe)
       Port(info, name, direction, tpe)
     })
@@ -280,7 +282,7 @@ object ReplaceVecOfBools {
     candidates.clear()
     inputs.clear()
 
-    mod.copy(ports = ports, body = Block(Block(outputDefaults) +: bodyx +: finalConnects))
+    mod.copy(ports = portsx, body = Block(Block(outputDefaults) +: bodyx +: finalConnects))
   }
 
   private def keyToExpr(name: String): Expression = {
@@ -299,10 +301,18 @@ class ReplaceVecOfBools extends Transform {
   def outputForm = HighForm
 
   def execute(state: CircuitState): CircuitState = {
+    val combLoopChecker = new CheckCombLoopsVecs()
+    val badModules = new mutable.HashSet[String]()
     val modulesx = state.circuit.modules.map {
       case mod: Module =>
-        new CheckCombLoopsVecs().collectBadVecs(mod)
-        ReplaceVecOfBools.replaceVecOfBools(mod)
+        if (combLoopChecker.hasBadVecs(mod)) {
+          println("NOT OPTIMIZED: " + mod.name)
+          badModules.add(mod.name)
+          mod
+        } else {
+          println("optimized vec of bools: " + mod.name)
+          ReplaceVecOfBools.replaceVecOfBools(mod, badModules)
+        }
       case ext: ExtModule => ext
     }
 
