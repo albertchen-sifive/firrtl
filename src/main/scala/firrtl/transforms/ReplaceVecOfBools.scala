@@ -301,6 +301,7 @@ class ReplaceVecOfBools extends Transform {
   def execute(state: CircuitState): CircuitState = {
     val modulesx = state.circuit.modules.map {
       case mod: Module =>
+        new CheckCombLoopsVecs().collectBadVecs(mod)
         ReplaceVecOfBools.replaceVecOfBools(mod)
       case ext: ExtModule => ext
     }
