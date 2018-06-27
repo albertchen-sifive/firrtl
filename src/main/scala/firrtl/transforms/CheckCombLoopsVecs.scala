@@ -3,20 +3,10 @@
 package firrtl.transforms
 
 import scala.collection.mutable
-import scala.collection.immutable.HashSet
-import scala.collection.immutable.HashMap
-import annotation.tailrec
 import firrtl._
 import firrtl.ir._
-import firrtl.passes.{Errors, PassException}
 import firrtl.Mappers._
-import firrtl.annotations._
-import firrtl.Utils.throwInternalError
 import firrtl.graph.{DiGraph, MutableDiGraph}
-import firrtl.analyses.InstanceGraph
-
-object CheckCombLoopsVecs {
-}
 
 class CheckCombLoopsVecs {
 
@@ -33,17 +23,6 @@ class CheckCombLoopsVecs {
       case BundleType(fields) => fields.flatMap(f => expandBundle(f.tpe).map(fieldDelimeter + f.name + _))
       case _ => Seq("")
     }
-
-    def getDeps(source: Expression): Seq[Connectable] = source match {
-      case _: WRef | _: WSubIndex | _: WSubAccess | _: WSubField => Seq(Connectable(source))
-      case other =>
-        val deps = new mutable.ArrayBuffer[Connectable]
-        other.mapExpr { e =>
-          deps ++= getDeps(e)
-          e
-        }
-        deps
-    }
   }
 
   private object Connectable {
@@ -55,6 +34,20 @@ class CheckCombLoopsVecs {
       case WSubAccess(expr, _, _, _) => fromExpr(expr)
       case WSubIndex(expr, _, _, _) => fromExpr(expr)
     }
+
+    def getDeps(source: Expression): Seq[Connectable] = source match {
+      case _: WRef |
+           _: WSubIndex |
+           _: WSubAccess |
+           _: WSubField => Seq(Connectable(source))
+      case other =>
+        val deps = new mutable.ArrayBuffer[Connectable]
+        other.mapExpr { e =>
+          deps ++= getDeps(e)
+          e
+        }
+        deps
+    }
   }
 
   private class MyDigraph(diGraph: MutableDiGraph[LogicNode]) {
@@ -64,7 +57,7 @@ class CheckCombLoopsVecs {
       val lhsExpanded = lhs.toLogicNodes
       val rhsExpanded = rhs.toLogicNodes
       lhsExpanded.zip(rhsExpanded).foreach { case (u, v) =>
-        println(u, v, diGraph.addEdgeIfValid(u, v))
+        diGraph.addEdgeIfValid(u, v)
       }
     }
 
@@ -79,24 +72,28 @@ class CheckCombLoopsVecs {
     }
 
     def toDigraph: DiGraph[LogicNode] = {
-      println(diGraph.getEdgeMap)
       DiGraph(diGraph).simplify(vecNodes)
+    }
+
+    def containsVecCycle: Boolean = {
+      val hasSelfEdges = diGraph.getEdgeMap.filterKeys(vecNodes.contains).exists{ case (k, v) => v.contains(k) }
+      diGraph.simplify(vecNodes).findSCCs.exists(_.length > 1) | hasSelfEdges
     }
   }
 
-  private def getStmtDeps(deps: MyDigraph)(s: Statement): Statement = {
+  private def getStmtDeps(deps: MyDigraph, conds: Seq[Connectable])(s: Statement): Statement = {
     s match {
       case Connect(_, loc @ SubAccess(vec, index, _), expr) =>
         val lhs = Connectable(loc)
         deps.addDep(lhs, Connectable(index))
-        deps.addDeps(lhs, lhs.getDeps(expr))
+        deps.addDeps(lhs, Connectable.getDeps(expr))
       case Connect(_, loc, expr) =>
         val lhs = Connectable(loc)
-        deps.addDeps(lhs, lhs.getDeps(expr))
+        deps.addDeps(lhs, Connectable.getDeps(expr))
       case DefWire(_, name, tpe) => deps.addNode(Connectable(name, tpe))
       case DefNode(_, name, expr) =>
         val lhs = Connectable(name, expr.tpe)
-        deps.addDeps(lhs, lhs.getDeps(expr))
+        deps.addDeps(lhs, Connectable.getDeps(expr))
       case m: DefMemory if m.readLatency == 0 =>
         val addrType = UIntType(UnknownWidth)
         val enType = UIntType(IntWidth(1))
@@ -113,7 +110,11 @@ class CheckCombLoopsVecs {
           deps.addDeps(dataNode, Seq(addrNode, enNode))
         }
       case WDefInstance(_, name, _, tpe) => deps.addNode(Connectable(name, tpe))
-      case _ => s map getStmtDeps(deps)
+      case Conditionally(_, cond, conseq, alt) =>
+        val condConnectables = Connectable.getDeps(cond) ++: conds
+        getStmtDeps(deps, condConnectables)(conseq)
+        getStmtDeps(deps, condConnectables)(alt)
+      case _ => s map getStmtDeps(deps, conds)
     }
     s
   }
@@ -130,25 +131,28 @@ class CheckCombLoopsVecs {
     walk.drop(walk.indexOf(current)) :+ current
   }
 
+  def hasBadVecs(m: Module): Boolean = {
+    val internalDeps = new MyDigraph(new MutableDiGraph[LogicNode])
+    m.ports.foreach(p => internalDeps.addNode(Connectable(p.name, p.tpe)))
+    m map getStmtDeps(internalDeps, Seq.empty)
+    internalDeps.containsVecCycle
+  }
+
   def collectBadVecs(m: Module): Set[String] = {
     val internalDeps = new MyDigraph(new MutableDiGraph[LogicNode])
     m.ports.foreach(p => internalDeps.addNode(Connectable(p.name, p.tpe)))
-    m map getStmtDeps(internalDeps)
+    m map getStmtDeps(internalDeps, Seq.empty)
     val moduleGraph = internalDeps.toDigraph
-    println(moduleGraph.getEdgeMap)
 
     val badVecs = new mutable.HashSet[String]
     val cycles = moduleGraph.findSCCs.filter(_.length > 1) map { scc =>
-      //val sccSubgraph = moduleGraph.subgraph(scc.toSet)
-      //val cycle = findCycleInSCC(sccSubgraph)
-      //(cycle zip cycle.tail).foreach { case (a, b) => require(moduleGraph.getEdges(a).contains(b)) }
-      //println("found cycle:")
-      //cycle.map(n => println(n.name))
+      val sccSubgraph = moduleGraph.subgraph(scc.toSet)
+      val cycle = findCycleInSCC(sccSubgraph)
+      (cycle zip cycle.tail).foreach { case (a, b) => require(moduleGraph.getEdges(a).contains(b)) }
 
       badVecs += scc.head.name//cycle.map(n => n.name)
     }
 
-    println(badVecs.toSet)
     badVecs.toSet
   }
 }
