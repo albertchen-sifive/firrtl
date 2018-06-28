@@ -5,6 +5,8 @@ package transforms
 
 import firrtl.ir._
 import firrtl.Utils._
+import firrtl.passes.CheckTypes.IndexTooLarge
+import firrtl.passes.ExpandConnects
 
 import scala.collection.mutable
 
@@ -29,7 +31,7 @@ object ReplaceVecOfBools {
 
     case BundleType(fields) => BundleType(fields.map { field =>
       field.copy(tpe = replaceAndRegister(name + fieldDelimeter + field.name,
-        isInput ^ field.flip == Flip,
+        isInput ^ (field.flip == Flip),
         hasDirection)(field.tpe))
     })
     case other => other
@@ -77,16 +79,29 @@ object ReplaceVecOfBools {
                            vec: Expression,
                            index: Int,
                            default: Expression,
-                           value: Expression,
+                           valuex: Expression,
                            tpe: Type): Statement = {
-    val shiftedValue = DoPrim(PrimOps.Shl, Seq(value), Seq(index), default.tpe)
+    val value = valuex.mapType(_ => BoolType)
 
     val UIntType(IntWidth(width)) = default.tpe
-    val oneHot = DoPrim(PrimOps.Shl, Seq(UIntLiteral(1, IntWidth(width))), Seq(index), tpe)
-    val mask = DoPrim(PrimOps.Not, Seq(oneHot), Seq.empty, tpe)
-    val maskedDefault = DoPrim(PrimOps.And, Seq(default, mask), Seq.empty, tpe)
 
-    assignVec(info, namespace, vec, DoPrim(PrimOps.Or, Seq(maskedDefault, shiftedValue), Seq.empty, tpe))
+    val upperbits = DoPrim(PrimOps.Bits, Seq(default), Seq(width - 1, index + 1), UIntType(IntWidth(width - index - 1)))
+    val lowerbits = DoPrim(PrimOps.Bits, Seq(default), Seq(index - 1, 0), UIntType(IntWidth(index)))
+
+    val newValue = if (width == 1) {
+      value
+    } else if (index == 0) {
+      DoPrim(PrimOps.Cat, Seq(upperbits, value), Seq.empty, default.tpe)
+    } else if (index == (width - 1)) {
+      DoPrim(PrimOps.Cat, Seq(value, lowerbits), Seq.empty, default.tpe)
+    } else {
+      DoPrim(PrimOps.Cat,
+        Seq(upperbits, DoPrim(PrimOps.Cat, Seq(value, lowerbits), Seq.empty, UIntType(IntWidth(index + 1)))),
+        Seq.empty,
+        default.tpe)
+    }
+
+    assignVec(info, namespace, vec, newValue)
   }
 
   private def enterScope(info: Info, namespace: Namespace) = {
@@ -107,7 +122,13 @@ object ReplaceVecOfBools {
 
   private def onStmt(namespace: Namespace)(stmt: Statement): Statement = stmt match {
     case wire: DefWire => wire.mapType(replaceAndRegister(wire.name))
-    case reg: DefRegister => reg.mapExpr(onExpr(namespace)).mapType(replaceAndRegister(reg.name))
+    case reg: DefRegister =>
+      val regx = reg.mapExpr(onExpr(namespace)).mapType(replaceAndRegister(reg.name))
+      val regRef = WRef(reg.name)
+      if (isReplaced(regRef)) {
+        setDefault(regRef, regRef.copy(tpe = getDefault(regRef).tpe, kind = RegKind))
+      }
+      regx
     case node @ DefNode(_, name, origValue) =>
       val valuex = onExpr(namespace)(origValue)
       replaceAndRegister(name, isInput = true, hasDirection = true)(origValue.tpe)
@@ -176,7 +197,7 @@ object ReplaceVecOfBools {
       }.toSeq
 
       // reset flags
-      candidates.foreach{ case (k, (e, _)) => candidates.put(k, (e, false))}
+      candidates.foreach { case (k, (e, _)) => candidates.put(k, (e, false)) }
 
       // map conseq with new defaults, reassign newly created wires, then reset defaults
       val conseq = Block(Seq(onStmt(namespace)(origConseq)) ++ conditionalDefaults.filter(k => candidates(k._1)._2)
@@ -232,7 +253,7 @@ object ReplaceVecOfBools {
     case wSubIndex @ WSubIndex(origExpr, index, _, _) =>
       val expr = onExpr(namespace)(origExpr)
       if (expr.tpe != origExpr.tpe) {
-        DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Shr, Seq(expr), Seq(index), expr.tpe)), Seq(0, 0), BoolType)
+        DoPrim(PrimOps.Bits, Seq(expr), Seq(index, index), BoolType)
       } else {
         wSubIndex
       }
@@ -279,6 +300,7 @@ object ReplaceVecOfBools {
       case (origName, (wRef, _)) => Connect(NoInfo, keyToExpr(origName), wRef)
     }.toSeq
 
+    printCandidates
     candidates.clear()
     inputs.clear()
 
@@ -290,6 +312,8 @@ object ReplaceVecOfBools {
     val bundleRef: Expression = WRef(path.head, candidates(name)._1.tpe)
     path.tail.foldLeft(bundleRef)( (expr, field) => WSubField(expr, field) )
   }
+
+  def printCandidates = println(candidates.keySet)
 }
 
 /** Replace Vec of Bools
@@ -303,7 +327,7 @@ class ReplaceVecOfBools extends Transform {
   def execute(state: CircuitState): CircuitState = {
     val combLoopChecker = new CheckCombLoopsVecs()
     val badModules = new mutable.HashSet[String]()
-    val modulesx = state.circuit.modules.map {
+    val modulesx = ExpandConnects.execute(state).circuit.modules.map {
       case mod: Module =>
         if (combLoopChecker.hasBadVecs(mod)) {
           println("NOT OPTIMIZED: " + mod.name)
@@ -317,7 +341,9 @@ class ReplaceVecOfBools extends Transform {
     }
 
     val circuitState = state.copy(circuit = state.circuit.copy(modules = modulesx))
+    //println(circuitState.circuit.serialize)
 
     new ResolveAndCheck().execute(passes.ToWorkingIR.execute(circuitState))
+    //circuitState
   }
 }
