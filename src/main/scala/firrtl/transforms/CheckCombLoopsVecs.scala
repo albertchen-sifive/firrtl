@@ -28,7 +28,7 @@ class CheckCombLoopsVecs {
   private object Connectable {
     def apply(expression: Expression): Connectable = fromExpr(expression)
 
-    def fromExpr(expression: Expression, suffix: String = ""): Connectable = expression match {
+    private def fromExpr(expression: Expression, suffix: String = ""): Connectable = expression match {
       case WRef(name, tpe, _, _) => Connectable(name + suffix, tpe)
       case WSubField(expr, name, _, _) => fromExpr(expr, fieldDelimeter + name)
       case WSubAccess(expr, _, _, _) => fromExpr(expr)
@@ -36,10 +36,7 @@ class CheckCombLoopsVecs {
     }
 
     def getDeps(source: Expression): Seq[Connectable] = source match {
-      case _: WRef |
-           _: WSubIndex |
-           _: WSubAccess |
-           _: WSubField => Seq(Connectable(source))
+      case (_: WRef | _: WSubIndex | _: WSubAccess | _: WSubField) => Seq(Connectable(source))
       case other =>
         val deps = new mutable.ArrayBuffer[Connectable]
         other.mapExpr { e =>
@@ -50,15 +47,14 @@ class CheckCombLoopsVecs {
     }
   }
 
-  private class MyDigraph(diGraph: MutableDiGraph[LogicNode]) {
-    val vecNodes = new mutable.HashSet[LogicNode]()
+  private class MyDigraph {
+    private val diGraph = new MutableDiGraph[LogicNode]
+    private val vecNodes = new mutable.HashSet[LogicNode]()
 
     def addDep(lhs: Connectable, rhs: Connectable): Unit = {
       val lhsExpanded = lhs.toLogicNodes
       val rhsExpanded = rhs.toLogicNodes
-      lhsExpanded.zip(rhsExpanded).foreach { case (u, v) =>
-        diGraph.addEdgeIfValid(u, v)
-      }
+      lhsExpanded.zip(rhsExpanded).foreach { case (u, v) => diGraph.addEdgeIfValid(u, v) }
     }
 
     def addDeps(lhs: Connectable, rhs: Seq[Connectable]): Unit = rhs.foreach(r => addDep(lhs, r))
@@ -71,9 +67,7 @@ class CheckCombLoopsVecs {
       logicNodes.foreach(n => diGraph.addVertex(n))
     }
 
-    def toDigraph: DiGraph[LogicNode] = {
-      DiGraph(diGraph).simplify(vecNodes)
-    }
+    def toDigraph: DiGraph[LogicNode] = DiGraph(diGraph).simplify(vecNodes)
 
     def containsVecCycle: Boolean = {
       val hasSelfEdges = diGraph.getEdgeMap.filterKeys(vecNodes.contains).exists{ case (k, v) => v.contains(k) }
@@ -132,14 +126,14 @@ class CheckCombLoopsVecs {
   }
 
   def hasBadVecs(m: Module): Boolean = {
-    val internalDeps = new MyDigraph(new MutableDiGraph[LogicNode])
+    val internalDeps = new MyDigraph()
     m.ports.foreach(p => internalDeps.addNode(Connectable(p.name, p.tpe)))
     m map getStmtDeps(internalDeps, Seq.empty)
     internalDeps.containsVecCycle
   }
 
   def collectBadVecs(m: Module): Set[String] = {
-    val internalDeps = new MyDigraph(new MutableDiGraph[LogicNode])
+    val internalDeps = new MyDigraph()
     m.ports.foreach(p => internalDeps.addNode(Connectable(p.name, p.tpe)))
     m map getStmtDeps(internalDeps, Seq.empty)
     val moduleGraph = internalDeps.toDigraph

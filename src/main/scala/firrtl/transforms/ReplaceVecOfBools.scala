@@ -5,8 +5,7 @@ package transforms
 
 import firrtl.ir._
 import firrtl.Utils._
-import firrtl.passes.CheckTypes.IndexTooLarge
-import firrtl.passes.ExpandConnects
+import firrtl.passes.{Errors, ExpandConnects, InferTypes}
 
 import scala.collection.mutable
 
@@ -16,7 +15,8 @@ object ReplaceVecOfBools {
   private val inputs = new mutable.HashSet[String]()
 
   private val fieldDelimeter = '.'
-  private var badModules = new mutable.HashSet[String]()
+  private val badModules = new mutable.HashSet[String]()
+  private val errors = new Errors()
 
   private def replaceAndRegister(name: String,
                                  isInput: Boolean = true,
@@ -24,7 +24,6 @@ object ReplaceVecOfBools {
     case VectorType(BoolType, size) if  size > 0 && ((size & (size - 1)) == 0) =>
       candidates.put(name, (UIntLiteral(0, IntWidth(size)), false))
       if (hasDirection && isInput) {
-        inputs.add(name)
         candidates.put(name, (keyToExpr(name).mapType(_ => UIntType(IntWidth(size))), false))
       }
       UIntType(IntWidth(size))
@@ -39,9 +38,7 @@ object ReplaceVecOfBools {
 
   private def isReplaced(expr: Expression): Boolean = candidates.contains(expr.serialize)
   private def getDefault(expr: Expression): Expression = candidates(expr.serialize)._1
-  private def setDefault(expr: Expression, default: Expression): Unit = {
-    candidates.put(expr.serialize, (default, true))
-  }
+  private def setDefault(expr: Expression, default: Expression): Unit = candidates.put(expr.serialize, (default, true))
 
   private def assignVec(info: Info, namespace: Namespace, origExpr: Expression, value: Expression): DefNode = {
     val default = getDefault(origExpr)
@@ -50,11 +47,12 @@ object ReplaceVecOfBools {
     DefNode(info, tempName, value)
   }
 
-  private def vecToUInt(value: Expression): Expression = {
-    val VectorType(BoolType, size) = value.tpe
-    val firstBit: Expression = SubIndex(value, 0, BoolType)
-    (1 until size).foldLeft(firstBit)((expr, i) =>
-      DoPrim(PrimOps.Cat, Seq(SubIndex(value, i, BoolType), expr), Seq.empty, UIntType(IntWidth(i + 1))))
+  private def vecToUInt(value: Expression): Expression = value.tpe match {
+    case VectorType(BoolType, size) =>
+      val firstBit: Expression = SubIndex(value, 0, BoolType)
+      (1 until size).foldLeft(firstBit)((expr, i) =>
+        DoPrim(PrimOps.Cat, Seq(SubIndex(value, i, BoolType), expr), Seq.empty, UIntType(IntWidth(i + 1))))
+    case _ => value
   }
 
   private def replaceAccess(namespace: Namespace,
@@ -81,8 +79,8 @@ object ReplaceVecOfBools {
                            default: Expression,
                            valuex: Expression,
                            tpe: Type): Statement = {
-    val value = valuex.mapType(_ => BoolType)
 
+    val value = valuex.mapType(_ => BoolType)
     val UIntType(IntWidth(width)) = default.tpe
 
     val upperbits = DoPrim(PrimOps.Bits, Seq(default), Seq(width - 1, index + 1), UIntType(IntWidth(width - index - 1)))
@@ -104,22 +102,6 @@ object ReplaceVecOfBools {
     assignVec(info, namespace, vec, newValue)
   }
 
-  private def enterScope(info: Info, namespace: Namespace) = {
-    val prevDefaults = candidates.clone()
-
-    // create new wires for conditional assignments
-    val conditionalDefaults = prevDefaults.filter { case (name, _) => !inputs.contains(name) }.map {
-      case (name, _) => (name, (WRef(namespace.newTemp, getDefault(keyToExpr(name)).tpe), false))
-    }
-
-    // assign new wires to current default before conditional
-    val defaults = conditionalDefaults.flatMap {
-      case (name, (prevDefault, _)) =>
-        val wire = DefWire(info, prevDefault.name, prevDefault.tpe)
-        Seq(wire, Connect(info, prevDefault, candidates(name)._1))
-    }.toSeq
-  }
-
   private def onStmt(namespace: Namespace)(stmt: Statement): Statement = stmt match {
     case wire: DefWire => wire.mapType(replaceAndRegister(wire.name))
     case reg: DefRegister =>
@@ -138,20 +120,6 @@ object ReplaceVecOfBools {
         node.copy(value = valuex)
       }
 
-    case PartialConnect(info, WSubIndex(vec, index, _, _), origValue) if isReplaced(vec) =>
-      val default = getDefault(vec)
-      val value = onExpr(namespace)(origValue)
-      replaceIndex(namespace, info, vec, index, default, value, default.tpe)
-
-    case PartialConnect(info, WSubAccess(vec, origIndex, _, _), origValue) if isReplaced(vec) =>
-      val default = getDefault(vec)
-      val value = onExpr(namespace)(origValue)
-      val index = onExpr(namespace)(origIndex)
-      replaceAccess(namespace, info, vec, default, value, index, default.tpe)
-
-    case PartialConnect(info, expr, value) if isReplaced(expr) =>
-      assignVec(info, namespace, expr, onExpr(namespace)(value))
-
     case Connect(info, WSubIndex(vec, index, _, _), origValue) if isReplaced(vec) =>
       val default = getDefault(vec)
       val value = onExpr(namespace)(origValue)
@@ -163,8 +131,9 @@ object ReplaceVecOfBools {
       val index = onExpr(namespace)(origIndex)
       replaceAccess(namespace, info, vec, default, value, index, default.tpe)
 
-    case Connect(info, expr, origValue) if isReplaced(expr) =>
+    case Connect(info, origExpr, origValue) if isReplaced(origExpr) =>
       val value = onExpr(namespace)(origValue)
+      val expr = onExpr(namespace)(origExpr)
       if (isReplaced(expr) && value.tpe != getDefault(expr).tpe) {
         assignVec(info, namespace, expr, vecToUInt(value))
       } else {
@@ -185,45 +154,43 @@ object ReplaceVecOfBools {
       val cond = onExpr(namespace)(origCond)
 
       // create new wires for conditional assignments
-      val conditionalDefaults = prevDefaults.filter { case (name, _) => !inputs.contains(name) }.map {
-        case (name, _) => (name, (WRef(namespace.newTemp, getDefault(keyToExpr(name)).tpe), false))
+      val conditionalDefaults = prevDefaults.collect {
+        case (name, (default, _)) => (name, (WRef(namespace.newTemp, default.tpe), false))
       }
 
       // assign new wires to current default before conditional
       val defaults = conditionalDefaults.flatMap {
-        case (name, (prevDefault, _)) =>
-          val wire = DefWire(info, prevDefault.name, prevDefault.tpe)
-          Seq(wire, Connect(info, prevDefault, candidates(name)._1))
+        case (name, (condDefault, _)) =>
+          val wire = DefWire(info, condDefault.name, condDefault.tpe)
+          Seq(wire, Connect(info, condDefault, prevDefaults(name)._1))
       }.toSeq
 
       // reset flags
       candidates.foreach { case (k, (e, _)) => candidates.put(k, (e, false)) }
 
-      // map conseq with new defaults, reassign newly created wires, then reset defaults
-      val conseq = Block(Seq(onStmt(namespace)(origConseq)) ++ conditionalDefaults.filter(k => candidates(k._1)._2)
-        .map { case (origName, (prevDefault, _)) =>
-            conditionalDefaults.put(origName, (prevDefault, true))
-            Connect(info, prevDefault, candidates(origName)._1)
-        })
+      // map conseq with new defaults, reassign newly created wires
+      val conseq = Block(Seq(onStmt(namespace)(origConseq)) ++ conditionalDefaults.collect {
+        case (name, (default, touched)) if touched => Connect(info, default, candidates(name)._1)
+      })
 
-      // reset touched flags
+      // reset defaults and flags
       candidates ++= prevDefaults
       candidates.foreach{ case (k, (e, _)) => candidates.put(k, (e, false))}
 
       // do the same thing for alt block
-      val alt = if (origAlt == EmptyStmt) {
-        origAlt
-      } else {
-        Block(Seq(onStmt(namespace)(origAlt)) ++ conditionalDefaults.filter(k => candidates(k._1)._2)
-        .map { case (origName, (prevDefault, _)) =>
-            conditionalDefaults.put(origName, (prevDefault, true))
-            Connect(info, prevDefault, candidates(origName)._1)
+      val alt = origAlt match {
+        case EmptyStmt => origAlt
+        case _ => Block(Seq(onStmt(namespace)(origAlt)) ++ conditionalDefaults.collect {
+          case (name, (default, touched)) if touched => Connect(info, default, candidates(name)._1)
         })
       }
       candidates ++= prevDefaults
 
       val conditional = Conditionally(info, cond, conseq, alt)
-      conditionalDefaults.filter(_._2._2).foreach { case (k, (default, _)) => candidates.put(k, (default, true)) }
+      conditionalDefaults.foreach {
+        case (k, (default, touched)) if touched => candidates.put(k, (default, true))
+        case _ =>
+      }
 
       Block(defaults :+ conditional)
 
@@ -232,22 +199,16 @@ object ReplaceVecOfBools {
 
   private def onExpr(namespace: Namespace)(expr: Expression): Expression = expr match {
 
-    case Mux(origCond, origTval, origFval, tpe) =>
+    case origMux @ Mux(origCond, origTval, origFval, tpe) =>
       val cond = onExpr(namespace)(origCond)
-      val tval = onExpr(namespace)(origTval)
-      val fval = onExpr(namespace)(origFval)
-      if (tval.tpe != tpe | fval.tpe != tpe) {
-        val uintFval = fval.tpe match {
-          case _: VectorType => vecToUInt(fval)
-          case _ => fval
-        }
-        val uintTval = tval.tpe match {
-          case _: VectorType => vecToUInt(tval)
-          case _ => tval
-        }
-        Mux(cond, uintTval, uintFval, uintTval.tpe)
+      val uintTval = onExpr(namespace)(origTval)
+      val uintFval = onExpr(namespace)(origFval)
+      if (uintTval.tpe != tpe | uintFval.tpe != tpe) {
+        val tval = vecToUInt(uintTval)
+        val fval = vecToUInt(uintFval)
+        Mux(cond, tval, fval, mux_type(tval.tpe, fval.tpe))
       } else {
-        Mux(cond, tval, fval, tpe)
+        Mux(cond, uintTval, uintFval, tpe)
       }
 
     case wSubIndex @ WSubIndex(origExpr, index, _, _) =>
@@ -267,12 +228,9 @@ object ReplaceVecOfBools {
         wSubAccess
       }
 
-    case other =>
-      if (isReplaced(other)) {
-        other.mapType(_ => getDefault(other).tpe)
-      } else {
-        other.mapExpr(onExpr(namespace))
-      }
+    case replaced if isReplaced(replaced) => replaced.mapType(_ => getDefault(replaced).tpe)
+    case other => other.mapExpr(onExpr(namespace))
+
   }
 
   /** Replace Vec of Bools
@@ -286,23 +244,24 @@ object ReplaceVecOfBools {
     */
   def replaceVecOfBools(mod: Module, badModulesx: mutable.HashSet[String]): DefModule = {
     val namespace = Namespace(mod)
-    badModules = badModulesx
+    badModules ++= badModulesx
 
     val outputDefaults = new mutable.ListBuffer[Statement]()
-    val portsx = mod.ports.map({ case Port(info, name, direction, origTpe) =>
-      val tpe = replaceAndRegister(name, direction == Input, hasDirection = true)(origTpe)
-      Port(info, name, direction, tpe)
+    val portsx = mod.ports.map({
+      case p @ Port(_, name, direction, _) =>
+        val tpe = replaceAndRegister(name, direction == Input, hasDirection = true)(p.tpe)
+        p.copy(tpe = tpe)
     })
 
     val bodyx = onStmt(namespace)(mod.body)
 
-    val finalConnects = candidates.filterKeys(!inputs.contains(_)).map {
-      case (origName, (wRef, _)) => Connect(NoInfo, keyToExpr(origName), wRef)
+    val finalConnects = candidates.collect {
+      case (key, (default, touched)) if touched => Connect(NoInfo, keyToExpr(key), default)
     }.toSeq
 
     printCandidates
     candidates.clear()
-    inputs.clear()
+    badModules.clear()
 
     mod.copy(ports = portsx, body = Block(Block(outputDefaults) +: bodyx +: finalConnects))
   }
@@ -343,7 +302,8 @@ class ReplaceVecOfBools extends Transform {
     val circuitState = state.copy(circuit = state.circuit.copy(modules = modulesx))
     //println(circuitState.circuit.serialize)
 
-    new ResolveAndCheck().execute(passes.ToWorkingIR.execute(circuitState))
-    //circuitState
+    //new ResolveAndCheck().execute(passes.ToWorkingIR.execute(circuitState))
+    //InferTypes.execute(circuitState)
+    circuitState
   }
 }
