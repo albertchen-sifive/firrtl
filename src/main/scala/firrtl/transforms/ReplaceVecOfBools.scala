@@ -3,10 +3,10 @@
 package firrtl
 package transforms
 
-import firrtl.ir._
 import firrtl.Utils._
-import firrtl.analyses.InstanceGraph
-import firrtl.passes.{Errors, ExpandConnects, InferTypes}
+import firrtl.ir._
+import firrtl.passes.ExpandConnects
+import firrtl.transforms.CheckCombLoopsVecs.CandidateVec
 
 import scala.collection.mutable
 

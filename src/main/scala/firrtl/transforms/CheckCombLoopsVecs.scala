@@ -2,71 +2,42 @@
 
 package firrtl.transforms
 
-import scala.collection.mutable
-import firrtl._
-import firrtl.ir._
-import firrtl.Mappers._
 import firrtl.Utils.BoolType
+import firrtl._
 import firrtl.analyses.InstanceGraph
 import firrtl.graph.{DiGraph, MutableDiGraph}
+import firrtl.ir._
 
-
-sealed trait BaseNode {
-  def name: String
-  def tpe: Type
-
-  override def equals(obj: scala.Any): Boolean = obj match {
-    case b: BaseNode => (b.name == name) && (b.tpe == tpe)
-    case _ => false
-  }
-
-  override def hashCode(): Int = name.hashCode + tpe.hashCode()
-}
-
-case class CandidateVec(name: String, tpe: VectorType, hasDefault: Boolean) extends BaseNode
+import scala.collection.mutable
 
 object CheckCombLoopsVecs {
+  val fieldDelimiter = '.'
 
-  private val fieldDelimeter = '.'
-
-  private case class LogicNode(name: String)
-
-  private case class Node(name: String, tpe: Type) extends BaseNode {
-    private def expandBundle(tpe: Type): Seq[String] = tpe match {
-      case BundleType(fields) => fields.flatMap(f => expandBundle(f.tpe).map(fieldDelimeter + f.name + _))
-      case _ => Seq("")
-    }
+  case class CandidateVec(name: String, tpe: VectorType)(val hasDefault: Boolean) {
+    def toNode: Node = Node(name, tpe)
   }
 
-  private object Node {
+  case class Node(name: String, tpe: Type)
+
+  object Node {
     def apply(expr: Expression): Node = {
-      val first = getFirstIndex(expr)
+      val first = getOuterVec(expr)
       Node(first.serialize, first.tpe)
     }
 
     private def fromExpr(expression: Expression, suffix: String = ""): Node = expression match {
       case WRef(name, tpe, _, _) => Node(name + suffix, tpe)
-      case WSubField(expr, name, _, _) => fromExpr(expr, fieldDelimeter + name)
+      case WSubField(expr, name, _, _) => fromExpr(expr, CheckCombLoopsVecs.fieldDelimiter + name)
       case WSubAccess(expr, _, _, _) => fromExpr(expr)
       case WSubIndex(expr, _, _, _) => fromExpr(expr)
     }
-
-    def getDeps(source: Expression): Seq[Node] = source match {
-      case _: WRef | _: WSubIndex | _: WSubAccess | _: WSubField => Seq(Node(source))
-      case other =>
-        val deps = new mutable.ArrayBuffer[Node]
-        other.mapExpr { e =>
-          deps ++= getDeps(e)
-          e
-        }
-        deps
-    }
   }
 
-  def getFirstIndex(expr: Expression): Expression = {
+
+  def getOuterVec(expr: Expression): Expression = {
     var curr = expr
     var firstVec = expr
-    while(!curr.isInstanceOf[WRef]) {
+    while (!curr.isInstanceOf[WRef]) {
       curr = curr match {
         case WSubField(bundle, _, _, _) => bundle
         case WSubAccess(vec, _, _, _) =>
@@ -80,14 +51,31 @@ object CheckCombLoopsVecs {
     firstVec
   }
 
-  private class NodeDigraph {
-    private val diGraph = new MutableDiGraph[BaseNode]
-    def addDep(lhs: BaseNode, rhs: BaseNode): Unit = {
-      diGraph.addEdgeIfValid(lhs, rhs)
+  class NodeDigraph {
+    private val diGraph = new MutableDiGraph[Node]
+    def addDep(lhs: Node, rhs: Node): Unit = diGraph.addEdgeIfValid(lhs, rhs)
+    def addDeps(lhs: Node, rhs: Seq[Node]): Unit = rhs.foreach(addDep(lhs, _))
+    def addNode(connectable: Node): Unit = diGraph.addVertex(connectable)
+    def toDigraph: DiGraph[Node] = DiGraph(diGraph)
+
+    def getPortDigraph(ports: Set[Node]): NodeDigraph = {
+      val simplifiedGraph = diGraph.simplify(ports)
+      val result = new NodeDigraph
+      val edges = simplifiedGraph.getEdgeMap
+      edges.foreach { case (v, _) => result.addNode(v) }
+      edges.foreach { case (v, us) => us.foreach(result.addDep(v, _)) }
+      result
     }
-    def addDeps(lhs: BaseNode, rhs: Seq[BaseNode]): Unit = rhs.foreach(addDep(lhs, _))
-    def addNode(connectable: BaseNode): Unit = diGraph.addVertex(connectable)
-    def toDigraph: DiGraph[BaseNode] = DiGraph(diGraph)
+/*
+    def mergeDigraph(other: NodeDigraph): Unit = {
+      val result = new NodeDigraph
+
+      other.diGraph.transformNodes()
+        val iGraph = simplifiedModules(i.module).transformNodes(n => n.copy(inst = Some(i.name)))
+        iGraph.getVertices.foreach(deps.addVertex(_))
+        iGraph.getVertices.foreach({ v => iGraph.getEdges(v).foreach { deps.addEdge(v,_) } })
+    }
+    */
   }
 
   private class Scoreboard {
@@ -142,85 +130,59 @@ object CheckCombLoopsVecs {
 
   private def getStmtDeps(deps: NodeDigraph,
                           scoreboard: Scoreboard,
-                          portMap: Map[String, Set[CandidateVec]],
+                          portMap: Map[String, NodeDigraph],
                           conds: Seq[Node])(s: Statement): Statement = {
     s match {
-      case Connect(_, loc @ WSubAccess(vec, index, _, _), expr) =>
-        val lhs = vec.tpe match {
-          case v @ VectorType(BoolType, size) if size > 0 && ((size & (size - 1)) == 0) =>
-            CandidateVec(vec.serialize, v, hasDefault = false)
-          case _ => Node(loc)
-        }
-        deps.addNode(lhs)
-        deps.addDeps(lhs, Node.getDeps(index))
-        deps.addDeps(lhs, Node.getDeps(expr))
-        deps.addDeps(lhs, conds)
+      case Connect(_, loc: WSubAccess, expr) =>
+        val node = Node(loc)
+        deps.addNode(node)
+        deps.addDeps(node, getDeps(loc.index))
+        deps.addDeps(node, getDeps(expr))
+        deps.addDeps(node, conds)
+
       case Connect(_, loc @ WSubIndex(vec, index, _, _), expr) =>
-        val lhs = vec.tpe match {
-          case v @ VectorType(BoolType, size) if size > 0 && ((size & (size - 1)) == 0) =>
-            val candidate = CandidateVec(vec.serialize, v, hasDefault = false)
-            scoreboard.markScoreboard(candidate, index)
-            candidate
-          case _ => Node(loc)
-        }
+        getCandidates(vec).foreach(scoreboard.markScoreboard(_, index))
+        val node = Node(loc)
+        deps.addNode(node)
+        deps.addDeps(node, getDeps(expr))
+        deps.addDeps(node, conds)
 
-        deps.addNode(lhs)
-        deps.addDeps(lhs, Node.getDeps(expr))
-        deps.addDeps(lhs, conds)
       case Connect(_, loc, expr) =>
-        val lhs = loc.tpe match {
-          case v @ VectorType(BoolType, size) if size > 0 && ((size & (size - 1)) == 0) =>
-            val candidate = CandidateVec(loc.serialize, v, hasDefault = false)
-            (0 until size).foreach(scoreboard.markScoreboard(candidate, _))
-            candidate
-          case _ => Node(loc)
+        getCandidates(loc).foreach { v =>
+          val VectorType(_, size) = v.tpe
+          (0 until size).foreach(scoreboard.markScoreboard(v, _))
         }
-
-        deps.addNode(lhs)
-        deps.addDeps(lhs, Node.getDeps(expr))
-        deps.addDeps(lhs, conds)
+        val node = Node(loc)
+        deps.addNode(node)
+        deps.addDeps(node, getDeps(expr))
+        deps.addDeps(node, conds)
 
       case DefRegister(_, name, tpe, _, _, _) =>
-        collectCandidates(name, tpe, Input).map {
-          case v: CandidateVec =>
-            val candidate = v.copy(hasDefault = true)
-            scoreboard.addCandidate(candidate)
-            candidate
-          case node => node
+        getCandidates(name, tpe).foreach { c =>
+          scoreboard.addCandidate(c.copy()(hasDefault = true))
         }
+
       case DefWire(_, name, tpe) =>
-        val nodes = collectCandidates(name, tpe, Input).map {
-          case v: CandidateVec =>
-            val candidate = v.copy(hasDefault = false)
-            scoreboard.addCandidate(candidate)
-            candidate
-          case node => node
+        getCandidates(name, tpe).foreach { c =>
+          scoreboard.addCandidate(c.copy()(hasDefault = false))
         }
-        nodes.foreach(deps.addNode)
+
+        getNodes(name, tpe).foreach(deps.addNode)
 
       case DefNode(_, name, expr) =>
-        val nodes = collectCandidates(name, expr.tpe, Input).map {
-          case v: CandidateVec =>
-            val candidate = v.copy(hasDefault = true)
-            scoreboard.addCandidate(candidate)
-            candidate
-          case node => node
+        getCandidates(name, expr.tpe).foreach { c =>
+          scoreboard.addCandidate(c.copy()(hasDefault = true))
         }
-        val exprDeps = Node.getDeps(expr)
 
+        val nodes = getNodes(name, expr.tpe)
+        val exprDeps = getDeps(expr)
         nodes.foreach { n =>
           deps.addNode(n)
           deps.addDeps(n, exprDeps)
         }
 
-      case WDefInstance(_, name, module, tpe) =>
-        val nodes = collectCandidates(name, tpe, Input)
-        /*
-        val nodes = portMap(module).map { candidate =>
-          candidate.copy(name = name + fieldDelimeter + candidate.name, hasDefault = !candidate.hasDefault)
-        }*/
-        nodes.foreach { n =>
-          //scoreboard.addCandidate(n)
+      case WDefInstance(_, name, _, tpe) =>
+        getNodes(name, tpe).foreach { n =>
           deps.addNode(n)
         }
 
@@ -228,7 +190,7 @@ object CheckCombLoopsVecs {
         val addrType = UIntType(UnknownWidth)
         val enType = UIntType(IntWidth(1))
         for (rp <- m.readers) {
-          val portName = m.name + fieldDelimeter + rp
+          val portName = m.name + fieldDelimiter + rp
 
           val dataNode = Node(portName + "data", m.dataType)
           deps.addNode(dataNode)
@@ -240,7 +202,7 @@ object CheckCombLoopsVecs {
           deps.addDeps(dataNode, Seq(addrNode, enNode))
         }
       case Conditionally(_, cond, conseq, alt) =>
-        val conditionDeps = Node.getDeps(cond) ++: conds
+        val conditionDeps = getDeps(cond) ++: conds
 
         val conseqScoreboard = scoreboard.makeConditionalScoreboard()
         getStmtDeps(deps, conseqScoreboard, portMap, conditionDeps)(conseq)
@@ -254,65 +216,70 @@ object CheckCombLoopsVecs {
     s
   }
 
-  def collectCandidates(name: String, tpe: Type, direction: Direction): Seq[BaseNode] = {
-    tpe match {
-      case b: BundleType => expandBundle(name, b, direction == Input)
-      case v @ VectorType(BoolType, size) if size > 0 && ((size & (size - 1)) == 0) =>
-        Seq(CandidateVec(name, v, direction == Input))
-      case _ => Seq(Node(name, tpe))
-    }
+  def getDeps(expression: Expression): Seq[Node] = expression match {
+    case _: WRef | _: WSubIndex | _: WSubAccess | _: WSubField =>
+      val outerVec = getOuterVec(expression)
+      getNodes(outerVec.serialize, outerVec.tpe)
+    case other =>
+      val deps = new mutable.ArrayBuffer[Node]
+      other.mapExpr { e =>
+        deps ++= getDeps(e)
+        e
+      }
+      deps
   }
 
-  private def expandBundle(name: String, bundle: BundleType, isInput: Boolean): Seq[BaseNode] = {
-    bundle.fields.flatMap { field =>
-      val partialName = name + fieldDelimeter + field.name
-      field.tpe match {
-        case b: BundleType => expandBundle(partialName, b, isInput ^ (field.flip == Flip))
-        case v @ VectorType(BoolType, size) if size > 0 && ((size & (size - 1)) == 0) =>
-          Seq(CandidateVec(partialName, v, isInput))
-        case _ => Seq(Node(partialName, field.tpe))
-      }
+  def getNodes(name: String, tpe: Type): Seq[Node] = tpe match {
+    case b: BundleType =>
+      b.fields.flatMap(f => getNodes(name + fieldDelimiter + f.name, f.tpe))
+    case _ => Seq(Node(name, tpe))
+  }
+
+  def getCandidates(expression: Expression): Seq[CandidateVec] = {
+    getCandidates(expression.serialize, expression.tpe)
+  }
+
+  def getCandidates(name: String, tpe: Type, hasDefault: Boolean = false): Seq[CandidateVec] = {
+    tpe match {
+      case b: BundleType =>
+        b.fields.flatMap(f => getCandidates(name + fieldDelimiter + f.name, f.tpe, hasDefault ^ (f.flip == Flip)))
+      case v @ VectorType(BoolType, size) if size > 0 && ((size & (size - 1)) == 0) =>
+        Seq(CandidateVec(name, v)(hasDefault))
+      case _ => Seq.empty
     }
   }
 
   def getCandidateVecs(m: DefModule,
-                       portMap: Map[String, Set[CandidateVec]]): (Set[CandidateVec], Set[CandidateVec]) = {
+                       portDigraphs: Map[String, NodeDigraph]): (NodeDigraph, Set[CandidateVec]) = {
     val internalDeps = new NodeDigraph
     val scoreboard = new Scoreboard
     val portCandidates = new mutable.HashSet[CandidateVec]()
     m.ports.foreach { p =>
-      val connectables = collectCandidates(p.name, p.tpe, p.direction)
-      for (c <- connectables) {
-        c match {
-          case v: CandidateVec =>
-            //scoreboard.addCandidate(v)
-            portCandidates.add(v)
-          case _ =>
-        }
-        internalDeps.addNode(c)
+      getCandidates(p.name, p.tpe, p.direction == Input).foreach { c =>
+        //scoreboard.addCandidate(c)
+        portCandidates.add(c)
       }
+
+      getNodes(p.name, p.tpe).foreach(internalDeps.addNode)
     }
-    m.mapStmt(getStmtDeps(internalDeps, scoreboard, portMap, Seq.empty))
+    m.mapStmt(getStmtDeps(internalDeps, scoreboard, portDigraphs, Seq.empty))
 
     val diGraph = internalDeps.toDigraph
     val initializedVecs = scoreboard.getValidCandidates()
-    val simplified = diGraph.simplify(initializedVecs.filterNot(_.hasDefault).toSet)
-
-    //scoreboard.printNodes()
+    val simplified = diGraph.simplify(initializedVecs.collect{case v if !v.hasDefault => v.toNode})
 
     val sccs  = simplified.findSCCs.filter(_.length > 1)
-    //println(diGraph.getEdgeMap)
-    //println()
-    if (sccs.nonEmpty | diGraph.getEdgeMap.exists{ case (k, v) => v.contains(k) }) {
-      (Set.empty, Set.empty)
+
+    if (sccs.nonEmpty | diGraph.getEdgeMap.exists { case (k, v) => v.contains(k) }) {
+      (new NodeDigraph, Set.empty)
     } else {
-      (initializedVecs & portCandidates, initializedVecs)
+      (internalDeps.getPortDigraph((initializedVecs & portCandidates).map(_.toNode)), initializedVecs)
     }
   }
 
   def getCandidateVecsC(c: Circuit): Map[String, Set[CandidateVec]] = {
     val instanceGraph = new InstanceGraph(c)
-    val portMap = new mutable.HashMap[String, Set[CandidateVec]]()
+    val portMap = new mutable.HashMap[String, NodeDigraph]()
     val candidateMap = new mutable.HashMap[String, Set[CandidateVec]]()
     instanceGraph.moduleOrder.reverse.foreach { mod =>
       val (ports, candidates) = getCandidateVecs(mod, portMap.toMap)
