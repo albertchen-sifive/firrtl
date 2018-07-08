@@ -6,7 +6,7 @@ package transforms
 import firrtl.Utils._
 import firrtl.ir._
 import firrtl.passes.ExpandConnects
-import firrtl.transforms.CheckCombLoopsVecs.CandidateVec
+import firrtl.transforms.CandidateVecFinder.CandidateVec
 
 import scala.collection.mutable
 
@@ -284,7 +284,7 @@ class ReplaceVecOfBools extends Transform {
 
   def execute(state: CircuitState): CircuitState = {
     val expandedState = ExpandConnects.execute(state)
-    val candidatesMap = CheckCombLoopsVecs.getCandidateVecsC(expandedState.circuit)
+    val candidatesMap = CandidateVecFinder.getCandidateVecs(expandedState.circuit)
     val modulesx = expandedState.circuit.modules.map {
       case mod: Module =>
         val candidates = candidatesMap(mod.name)
