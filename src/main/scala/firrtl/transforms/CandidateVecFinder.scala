@@ -76,6 +76,8 @@ object CandidateVecFinder {
       }
     }
 
+    def getCandidates(): Set[CandidateVec] = vecNodes.keys.toSet
+
     def getValidCandidates(): Set[CandidateVec] = {
       vecNodes.collect { case (candidate, score) if score.forall(b => b) => candidate }(collection.breakOut)
     }
@@ -160,7 +162,7 @@ object CandidateVecFinder {
       case WDefInstance(_, inst, module, tpe) =>
         val nodes = getNodes(inst, tpe)
         nodes.foreach(deps.addNode)
-        getCandidates(inst, tpe)
+        getCandidates(inst, tpe, hasDefault = true)
           .map(c => c.copy()(hasDefault = c.hasDefault, module = Some(module))).foreach(scoreboard.addCandidate)
 
       case m: DefMemory if m.readLatency == 0 =>
@@ -231,7 +233,7 @@ object CandidateVecFinder {
     m.ports.foreach { p =>
       getCandidates(p.name, p.tpe, p.direction == Input).foreach { c =>
         val withModule = c.copy()(hasDefault = c.hasDefault, module = Some(m.name))
-        //scoreboard.addCandidate(withModule)
+        scoreboard.addCandidate(withModule)
         portCandidates.add(withModule)
       }
       getNodes(p.name, p.tpe).foreach(internalDeps.addNode)
@@ -244,7 +246,10 @@ object CandidateVecFinder {
 
     val sccs = simplified.findSCCs.filter(_.length > 1)
     if (sccs.nonEmpty | diGraph.getEdgeMap.exists { case (k, v) => v.contains(k) }) {
-      (validPorts + (m.name -> Set.empty[Node]), Set.empty)
+      val empties = scoreboard.getCandidates().collect {
+        case c if c.module.nonEmpty => c.module.get -> Set.empty[Node]
+      }.toMap
+      (validPorts ++ empties + (m.name -> Set.empty[Node]), Set.empty)
     } else {
       val newValidPorts = new mutable.HashMap[String, mutable.HashSet[Node]]
       newValidPorts.put(m.name, (portCandidates & initializedVecs).map(_.toNode))
@@ -255,7 +260,9 @@ object CandidateVecFinder {
 
       scoreboard.getInvalidCandidates().foreach { c =>
         c.module.foreach { mod =>
+          if (mod != m.name)
           newValidPorts(mod).remove(Node(c.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString), c.tpe))
+          println(Node(mod + fieldDelimiter + c.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString), c.tpe))
         }
       }
 
@@ -276,9 +283,10 @@ object CandidateVecFinder {
     val filteredCandidates = new mutable.HashMap[String, Set[CandidateVec]]()
     candidateMap.foreach { case (mod, candidates) =>
       val filtered = candidates.collect {
-        case vec if vec.module.isEmpty => vec
-        case inst if validPorts(inst.module.get).contains(
-          Node(inst.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString), inst.tpe)) => inst
+        case internalWire if internalWire.module.isEmpty => internalWire
+        case port if port.module.get == mod && validPorts(mod).contains(port.toNode) => port
+        case port if validPorts(port.module.get).contains(
+          Node(port.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString), port.tpe)) => port
       }
       filteredCandidates.put(mod, filtered)
     }
