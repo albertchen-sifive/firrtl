@@ -271,7 +271,7 @@ object ReplaceVecOfBools {
     path.tail.foldLeft(bundleRef)((expr, field) => WSubField(expr, field)).mapType(_ => candidates(name)._1.tpe)
   }
 
-  def printCandidates = println(candidates.keySet)
+  def printCandidates: Unit = println(candidates.keySet)
 }
 
 /** Replace Vec of Bools
@@ -279,29 +279,35 @@ object ReplaceVecOfBools {
   * This transform replaces Vecs of Bools with UInts
   */
 class ReplaceVecOfBools extends Transform {
-  def inputForm = HighForm
-  def outputForm = HighForm
+  def inputForm: HighForm.type = HighForm
+  def outputForm: HighForm.type = HighForm
 
   def execute(state: CircuitState): CircuitState = {
     val expandedState = ExpandConnects.execute(state)
+    val renamesx = RenameMap()
+    renamesx.setCircuit(expandedState.circuit.main)
     val candidatesMap = CandidateVecFinder.getCandidateVecs(expandedState.circuit)
     val modulesx = expandedState.circuit.modules.map {
       case mod: Module =>
         val candidates = candidatesMap(mod.name)
         if (candidates.isEmpty) {
-          println("NOT OPTIMIZED: " + mod.name)
           mod
         } else {
+          renamesx.setModule(mod.name)
+          candidates.foreach { candidate =>
+            for (i <- 0 until candidate.tpe.size) {
+              renamesx.rename(s"${candidate.name}[$i]", s"${candidate.name}")
+            }
+          }
+
           println("optimized vec of bools: " + mod.name)
           ReplaceVecOfBools.replaceVecOfBools(mod, candidates)
         }
       case ext: ExtModule => ext
     }
 
-    val circuitState = expandedState.copy(circuit = expandedState.circuit.copy(modules = modulesx))
-    //println(circuitState.circuit.serialize)
-
-    //new ResolveAndCheck().execute(passes.ToWorkingIR.execute(circuitState))
+    val circuitState = expandedState.copy(circuit = expandedState.circuit.copy(modules = modulesx),
+      renames = Some(renamesx))
     circuitState
   }
 }
