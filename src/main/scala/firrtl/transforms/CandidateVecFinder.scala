@@ -85,13 +85,13 @@ object CandidateVecFinder {
       }
     }
 
-    def getCandidates(): Set[CandidateVec] = vecNodes.keys.toSet
+    def getCandidates: Set[CandidateVec] = vecNodes.keys.toSet
 
-    def getValidCandidates(): Set[CandidateVec] = {
+    def getValidCandidates: Set[CandidateVec] = {
       vecNodes.collect { case (candidate, score) if score.forall(b => b) => candidate }(collection.breakOut)
     }
 
-    def getInvalidCandidates(): Set[CandidateVec] = {
+    def getInvalidCandidates: Set[CandidateVec] = {
       vecNodes.collect { case (candidate, score) if score.exists(b => !b) => candidate }(collection.breakOut)
     }
 
@@ -121,7 +121,7 @@ object CandidateVecFinder {
 
   private def getStmtDeps(deps: NodeDigraph,
                           scoreboard: Scoreboard,
-                          externalDeps: Map[String, NodeDigraph],
+                          externalDeps: Map[String, (NodeDigraph, Set[Node])],
                           conds: Seq[Node])(s: Statement): Statement = {
     s match {
       case Connect(_, loc: WSubAccess, expr) =>
@@ -146,18 +146,18 @@ object CandidateVecFinder {
 
       case DefRegister(_, name, tpe, _, _, _) =>
         getCandidates(name, tpe).foreach { c =>
-          scoreboard.addCandidate(c.copy()(hasDefault = true, module = Option.empty))
+          scoreboard.addCandidate(c.copy()(hasDefault = true, Option.empty))
         }
 
       case DefWire(_, name, tpe) =>
         getCandidates(name, tpe).foreach { c =>
-          scoreboard.addCandidate(c.copy()(hasDefault = false, module = Option.empty))
+          scoreboard.addCandidate(c.copy()(hasDefault = false, Option.empty))
         }
         getNodes(name, tpe).foreach(deps.addNode)
 
       case DefNode(_, name, expr) =>
         getCandidates(name, expr.tpe).foreach { c =>
-          scoreboard.addCandidate(c.copy()(hasDefault = true, module = Option.empty))
+          scoreboard.addCandidate(c.copy()(hasDefault = true, Option.empty))
         }
         val nodes = getNodes(name, expr.tpe)
         val exprDeps = getDeps(expr)
@@ -169,10 +169,12 @@ object CandidateVecFinder {
       case WDefInstance(_, inst, module, tpe) =>
         val nodes = getNodes(inst, tpe)
         nodes.foreach(deps.addNode)
-        deps.mergeDigraph(inst, externalDeps(module))
+        deps.mergeDigraph(inst, externalDeps(module)._1)
 
         getCandidates(inst, tpe, hasDefault = true)
-          .map(c => c.copy()(hasDefault = c.hasDefault, module = Some(module)))
+          .filter(c => externalDeps(module)._2.contains(
+            Node(c.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString), c.tpe)))
+          .map(c => c.copy()(c.hasDefault, Some(module)))
           .foreach(scoreboard.addCandidate)
 
       case m: DefMemory if m.readLatency == 0 =>
@@ -237,54 +239,50 @@ object CandidateVecFinder {
   private def getModuleCandidates(currentModule: DefModule,
                                   validPorts: Map[String, (NodeDigraph, Set[Node])]):
   (Map[String, (NodeDigraph, Set[Node])], Set[CandidateVec]) = {
-    val internalDeps = new NodeDigraph
     val scoreboard = new Scoreboard
-    val portCandidates = new mutable.HashSet[CandidateVec]()
-    val portNodes = new mutable.HashSet[Node]()
+    val internalDeps = new NodeDigraph
 
-    currentModule.ports.foreach { p =>
-      getCandidates(p.name, p.tpe, p.direction == Input).foreach { c =>
-        val candidateWithModule = c.copy()(hasDefault = c.hasDefault, module = Some(currentModule.name))
-        scoreboard.addCandidate(candidateWithModule)
-        portCandidates.add(candidateWithModule)
+    val portCandidates = currentModule.ports.flatMap { case Port(_, name, direction, tpe) =>
+      getCandidates(name, tpe, direction == Input).map { candidate =>
+        candidate.copy()(candidate.hasDefault, Some(currentModule.name))
       }
-      getNodes(p.name, p.tpe).foreach { n =>
-        internalDeps.addNode(n)
-        portNodes.add(n)
-      }
-    }
+    }.toSet
+    portCandidates.foreach(scoreboard.addCandidate)
 
-    currentModule.mapStmt(getStmtDeps(internalDeps, scoreboard, validPorts.mapValues(_._1), Seq.empty))
+    val portNodes = currentModule.ports.flatMap(p => getNodes(p.name, p.tpe)).toSet
+    portNodes.foreach(internalDeps.addNode)
 
-    val initializedVecs = scoreboard.getValidCandidates()
-    val portDiGraph = internalDeps.getSubgraph(portNodes.toSet)
+    currentModule.mapStmt(getStmtDeps(internalDeps, scoreboard, validPorts, Seq.empty))
 
-    val candidateGraph = internalDeps.getSubgraph(initializedVecs.map(_.toNode)).toDigraph
+    val validCandidates = scoreboard.getValidCandidates
+    val portDiGraph = internalDeps.getSubgraph(portNodes)
+
+    val candidateGraph = internalDeps.getSubgraph(validCandidates.map(_.toNode)).toDigraph
     val sccs = candidateGraph.findSCCs.filter(_.length > 1)
     if (sccs.nonEmpty | candidateGraph.getEdgeMap.exists { case (k, v) => v.contains(k) }) {
-      val empties = scoreboard.getCandidates().flatMap(_.module).collect {
+      val empties = scoreboard.getCandidates.flatMap(_.module).collect {
         case moduleName if validPorts.contains(moduleName) =>
           moduleName -> validPorts(moduleName).copy(_2 = Set.empty[Node])
       }
       (validPorts ++ empties + (currentModule.name -> (portDiGraph, Set.empty[Node])), Set.empty)
     } else {
 
-      val updatedPorts = scoreboard.getInvalidCandidates()
-        .filter(_.module.nonEmpty)
+      val updatedPorts = scoreboard.getCandidates
+        .filter(_.module.exists(_ != currentModule.name))
         .groupBy(_.module.get)
-        .collect { case (k, v) if k != currentModule.name =>
-          k -> validPorts(k).copy(_2 = validPorts(k)._2 &~ v.map {
-            case c if c.module.get == currentModule.name =>
-              c.toNode
-            case c =>
-              val pathName = c.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString)
-              Node(pathName, c.tpe)
-          })
+        .collect { case (k, v) =>
+          val commonCandidates = v.groupBy(_.name.takeWhile(_ != '.')).values.map { candidates =>
+            candidates.collect { case candidate if validCandidates.contains(candidate) =>
+              val pathName = candidate.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString)
+              Node(pathName, candidate.tpe)
+            }
+          }.reduce(_ & _)
+          k -> validPorts(k).copy(_2 = validPorts(k)._2 & commonCandidates)
         }
 
-      val currentModulePorts = currentModule.name -> (portDiGraph, (initializedVecs & portCandidates).map(_.toNode))
+      val currentModulePorts = currentModule.name -> (portDiGraph, (validCandidates & portCandidates).map(_.toNode))
 
-      (validPorts ++ updatedPorts + currentModulePorts, initializedVecs)
+      (validPorts ++ updatedPorts + currentModulePorts, validCandidates)
     }
   }
 

@@ -13,6 +13,7 @@ import scala.collection.mutable
 object ReplaceVecOfBools {
   private val candidates = new mutable.HashMap[String, (Expression, Boolean)]()
   private val fieldDelimiter = '.'
+  private val tempNamePrefix = "_MY_TEMP"
 
   private def replace(name: String)(tpe: Type): Type = tpe match {
     case BundleType(fields) => BundleType(fields.map { field =>
@@ -28,7 +29,7 @@ object ReplaceVecOfBools {
 
   private def assignVec(info: Info, namespace: Namespace, origExpr: Expression, value: Expression): DefNode = {
     val default = getDefault(origExpr)
-    val tempName = namespace.newTemp
+    val tempName = namespace.newName(tempNamePrefix)
     setDefault(origExpr, WRef(tempName, default.tpe))
     DefNode(info, tempName, value)
   }
@@ -91,41 +92,39 @@ object ReplaceVecOfBools {
     assignVec(info, namespace, vec, newValue)
   }
 
+  private def reconnect(info: Info)(loc: Expression, expr: Expression): Seq[Statement] = {
+    (loc.tpe, expr.tpe) match {
+      case (g: GroundType, v: VectorType) => Seq(Connect(info, loc, vecToUInt(expr)))
+      case (VectorType(tpe, size), VectorType(_, _)) =>
+        (0 until size).map { i =>
+          Connect(info, WSubIndex(loc, i, tpe, UNKNOWNGENDER), WSubIndex(expr, i, tpe, UNKNOWNGENDER))
+        }
+      case (BundleType(fields1), BundleType(fields2)) => (fields1 zip fields2).flatMap { case (f1, f2) =>
+        reconnect(info)(WSubField(loc, f1.name, f1.tpe, UNKNOWNGENDER),
+          WSubField(expr, f2.name, f2.tpe, UNKNOWNGENDER))
+      }
+      case _ => Seq(Connect(info, loc, expr))
+    }
+  }
+
   private def onStmt(namespace: Namespace)(stmt: Statement): Statement = stmt match {
     case wire: DefWire => wire.mapType(replace(wire.name))
     case reg @ DefRegister(info, name, origTpe, _, _, origInit) =>
       val tpex = replace(name)(origTpe)
       val initx = onExpr(origInit)
       val regx = reg.copy(tpe = tpex, init = initx)
-      if (tpex.isInstanceOf[VectorType] && tpex != initx.tpe) {
-        val tempName = namespace.newTemp
-        val loc = WRef(tempName, tpex, RegKind, UNKNOWNGENDER)
-        val VectorType(BoolType, size) = tpex
+      if (tpex != initx.tpe) {
 
-        val connects = Block((0 until size).map { i =>
-          Connect(info,
-            WSubIndex(loc, i, BoolType, UNKNOWNGENDER),
-            DoPrim(PrimOps.Bits, Seq(initx), Seq(0, 0), BoolType))
-        })
+        val tempExprName = namespace.newName(tempNamePrefix)
+        val tempNode = DefNode(info, tempExprName, initx)
+        val expr = WRef(tempExprName, initx.tpe, WireKind, UNKNOWNGENDER)
 
-        Block(Seq(DefWire(info, tempName, tpex), connects, regx.copy(init = loc).mapExpr(onExpr)))
-      } else if (tpex != initx.tpe) {
-        val tempName = namespace.newTemp
+        val tempLocName = namespace.newName(tempNamePrefix)
+        val loc = WRef(tempLocName, tpex, WireKind, UNKNOWNGENDER)
 
-        val loc = WRef(tempName, tpex, RegKind, UNKNOWNGENDER)
-        val locs = create_exps(loc)
+        val connects = reconnect(info)(loc, expr)
 
-        val expr = vecToUInt(initx)
-        val exps = create_exps(expr)
-
-        val connects = Block(locs.zip(exps).zipWithIndex map { case ((l, e), i) =>
-          val connect = get_flip(loc.tpe, i, Default) match {
-            case Default => Connect(info, l, e)
-            case Flip => Connect(info, e, l)
-          }
-          connect.mapExpr(onExpr)
-        })
-        Block(Seq(DefWire(info, tempName, tpex), connects, regx.copy(init = loc).mapExpr(onExpr)))
+        Block(tempNode +: DefWire(info, tempLocName, tpex) +: regx.copy(init = loc).mapExpr(onExpr) +: connects)
       } else {
         regx.mapExpr(onExpr)
       }
@@ -168,7 +167,7 @@ object ReplaceVecOfBools {
 
       // create new wires for conditional assignments
       val conditionalDefaults = prevDefaults.collect {
-        case (name, (default, _)) => (name, (WRef(namespace.newTemp, default.tpe), false))
+        case (name, (default, _)) => (name, (WRef(namespace.newName(tempNamePrefix), default.tpe), false))
       }
 
       // assign new wires to current default before conditional
@@ -229,8 +228,7 @@ object ReplaceVecOfBools {
     case WSubAccess(e, index, _, _) if e.tpe.isInstanceOf[UIntType] =>
       DoPrim(PrimOps.Bits, Seq(DoPrim(PrimOps.Dshr, Seq(e, index), Seq.empty, e.tpe)), Seq(0, 0), BoolType)
 
-    case replaced if isReplaced(replaced) => replaced.mapType(_ => getDefault(replaced).tpe)
-    case other => other
+    case replaced => replaced.mapType(replace(replaced.serialize))
   }
 
   /** Replace Vec of Bools
@@ -291,6 +289,7 @@ class ReplaceVecOfBools extends Transform {
       case mod: Module =>
         val candidates = candidatesMap(mod.name)
         if (candidates.isEmpty) {
+          println("NOT OPTIMIZED: " + mod.name)
           mod
         } else {
           renamesx.setModule(mod.name)
@@ -308,6 +307,7 @@ class ReplaceVecOfBools extends Transform {
 
     val circuitState = expandedState.copy(circuit = expandedState.circuit.copy(modules = modulesx),
       renames = Some(renamesx))
+    //println(circuitState.circuit.serialize)
     circuitState
   }
 }
