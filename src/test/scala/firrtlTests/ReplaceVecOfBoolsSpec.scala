@@ -55,7 +55,7 @@ class ReplaceVecOfBoolsSpec extends FirrtlPropSpec {
   }
 
   property(s"it shouldn't break when there are nested vectors") {
-    firrtlEquivalenceTest("testVecBundle", srcDir, transforms, resets = Seq((1, "reset", 1)))
+    firrtlEquivalenceTest("testVecBundle", srcDir, transforms)
   }
 }
 

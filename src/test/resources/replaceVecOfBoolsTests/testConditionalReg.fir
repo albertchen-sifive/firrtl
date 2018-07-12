@@ -1,5 +1,5 @@
-circuit Top:
-  module Top:
+circuit testConditionalReg:
+  module testConditionalReg:
     input clock: Clock
     input in: UInt<2>
     input cond: UInt<1>

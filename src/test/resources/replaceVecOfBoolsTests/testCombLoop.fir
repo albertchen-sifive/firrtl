@@ -1,4 +1,4 @@
-circuit Top:
+circuit testCombLoop:
   module MyModule:
     input boolVec: UInt<1>[8]
     input dummyVec: UInt<1>[1]
@@ -22,7 +22,7 @@ circuit Top:
     outVec <= boolVec
     outVec[0] <= setVal
   
-  module Top:
+  module testCombLoop:
     input boolVec: UInt<8>
     input dummyVec: UInt<1>
     input select: UInt<3>

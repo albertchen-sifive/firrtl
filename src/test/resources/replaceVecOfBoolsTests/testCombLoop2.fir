@@ -1,4 +1,4 @@
-circuit Top:
+circuit testCombLoop2:
   module InnerModule:
     input in1: UInt<1>
     input in2: UInt<1>
@@ -7,7 +7,7 @@ circuit Top:
     outVec[0] <= in1
     outVec[1] <= in2
 
-  module Top:
+  module testCombLoop2:
     input in1: UInt<1>
     output outVec: UInt<2>
 
