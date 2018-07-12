@@ -1,4 +1,4 @@
-circuit testConditional:
+circuit testConditional3:
   module Dummy:
     input boolVec: UInt<1>[8]
     input select: UInt<3>
@@ -27,7 +27,7 @@ circuit testConditional:
     myDummy.boolVec[0] <= boolVec[5]
     myDummy.select <= select
     dummySelected <= myDummy.selected
-  module testConditional:
+  module testConditional3:
     input boolVec: UInt<8>
     input select: UInt<3>
     output topSelected: UInt<1>

@@ -30,16 +30,16 @@ class ReplaceVecOfBoolsSpec extends FirrtlPropSpec {
     firrtlEquivalenceTest("testCombLoop2", srcDir, transforms)
   }
 
-  property(s"handle wires declared within conditionals") {
-    firrtlEquivalenceTest("testConditional", srcDir, transforms)
-  }
-
   property(s"handle simple conditionals") {
     firrtlEquivalenceTest("testConditional1", srcDir, transforms)
   }
 
   property(s"handle nested conditionals") {
     firrtlEquivalenceTest("testConditional2", srcDir, transforms)
+  }
+
+  property(s"handle wires declared within conditionals") {
+    firrtlEquivalenceTest("testConditional3", srcDir, transforms)
   }
 
   property(s"conditional register assignments should work too") {
@@ -54,10 +54,6 @@ class ReplaceVecOfBoolsSpec extends FirrtlPropSpec {
     firrtlEquivalenceTest("testNestedModules1", srcDir, transforms)
   }
 
-  property(s"test ICache example") {
-    firrtlEquivalenceTest("invalidated", srcDir, transforms, resets = Seq((1, "reset", 1)))
-  }
-
   property(s"it shouldn't break when there are nested vectors") {
     firrtlEquivalenceTest("testVecBundle", srcDir, transforms, resets = Seq((1, "reset", 1)))
   }
@@ -66,7 +62,6 @@ class ReplaceVecOfBoolsSpec extends FirrtlPropSpec {
 class ReplaceVecOfBoolsErrorsSpec extends FirrtlFlatSpec {
   private val srcDir = "/replaceVecOfBoolsTests"
   private val transforms = Seq(new ReplaceVecOfBools)
-
 
   "Circuits with combinational loops" should "still have combinational loops" in {
     an [CombLoopException] should be thrownBy compileFirrtlTest("combLoopErrorTest", srcDir, transforms)
