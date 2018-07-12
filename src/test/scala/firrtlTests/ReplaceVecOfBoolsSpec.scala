@@ -30,6 +30,10 @@ class ReplaceVecOfBoolsSpec extends FirrtlPropSpec {
     firrtlEquivalenceTest("testCombLoop2", srcDir, transforms)
   }
 
+  property(s"should also avoid combinational loops from conditionals") {
+    firrtlEquivalenceTest("testCombLoop3", srcDir, transforms)
+  }
+
   property(s"handle simple conditionals") {
     firrtlEquivalenceTest("testConditional1", srcDir, transforms)
   }
@@ -56,6 +60,10 @@ class ReplaceVecOfBoolsSpec extends FirrtlPropSpec {
 
   property(s"it shouldn't break when there are nested vectors") {
     firrtlEquivalenceTest("testVecBundle", srcDir, transforms)
+  }
+
+  property(s"should correctly handle bulk and partial connects") {
+    firrtlEquivalenceTest("bundleConnects", srcDir, transforms)
   }
 }
 

@@ -182,7 +182,8 @@ trait BackendCompilationUtilities {
           |prep; proc; opt; memory
           |miter -equiv -flatten $customTop $referenceTop miter
           |hierarchy -top miter
-          |sat -verify -tempinduct -prove trigger 0 $setSignals $setAtSignals -seq 1 miter""".stripMargin
+          |sat -verify -tempinduct -prove trigger 0 $setSignals $setAtSignals -seq 1 miter"""
+        .stripMargin
 
     val resultFile = testDir.getAbsolutePath + "/yosys_results"
     val command = Seq("echo", yosysScript) #| "yosys" #> new File(resultFile)
