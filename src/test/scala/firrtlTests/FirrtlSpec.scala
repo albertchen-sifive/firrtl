@@ -5,21 +5,44 @@ package firrtlTests
 import java.io._
 
 import com.typesafe.scalalogging.LazyLogging
+
 import scala.sys.process._
 import org.scalatest._
 import org.scalatest.prop._
-import scala.io.Source
 
+import scala.io.Source
 import firrtl._
 import firrtl.ir._
 import firrtl.Parser.UseInfo
 import firrtl.annotations._
-import firrtl.transforms.{DontTouchAnnotation, NoDedupAnnotation}
+import firrtl.transforms.{DontTouchAnnotation, GetNamespace, NoDedupAnnotation, RenameModules}
 import firrtl.util.BackendCompilationUtilities
 
 trait FirrtlRunners extends BackendCompilationUtilities {
 
   val cppHarnessResourceName: String = "/firrtl/testTop.cpp"
+
+  /** Compile a Firrtl file
+    *
+    * @param prefix is the name of the Firrtl file without path or file extension
+    * @param srcDir directory where all Resources for this test are located
+    * @param customAnnotations Optional Firrtl annotations
+    */
+  def firrtlEquivalenceTest(prefix: String,
+                            srcDir: String,
+                            customTransforms: Seq[Transform] = Seq.empty,
+                            customAnnotations: AnnotationSeq = Seq.empty,
+                            resets: Seq[(Int, String, Int)] = Seq.empty): Unit = {
+    val getNamespace = new GetNamespace
+    val customDir = compileFirrtlTest(prefix, srcDir, customTransforms :+ getNamespace, customAnnotations)
+
+    val referenceTop = getNamespace.newTopName.get
+    val renameModules = new RenameModules(getNamespace.namespace.get, referenceTop)
+    val referenceDir = compileFirrtlTest(prefix, srcDir, Seq(renameModules))
+
+    val testDir = createTestDirectory(prefix + "_equivalence_test")
+    assert(yosysExpectSuccess(prefix, customDir, referenceDir, referenceTop, testDir, resets))
+  }
 
   /** Compiles input Firrtl to Verilog */
   def compileToVerilog(input: String, annotations: AnnotationSeq = Seq.empty): String = {
@@ -242,5 +265,13 @@ abstract class CompilationTest(name: String, dir: String) extends FirrtlPropSpec
     compileFirrtlTest(name, dir)
   }
 }
-
+/** Super class for equivalence driven Firrtl tests */
+abstract class EquivalenceTest(name: String,
+                               dir: String,
+                               customTransforms: Seq[Transform],
+                               resets: Seq[(Int, String, Int)] = Seq.empty) extends FirrtlPropSpec {
+  property(s"$name with custom transforms should be equivalent to $name without transforms") {
+    firrtlEquivalenceTest(name, dir, customTransforms, resets = resets)
+  }
+}
 

@@ -237,7 +237,7 @@ object CandidateVecFinder {
   }
 
   private def getModuleCandidates(currentModule: DefModule,
-                                  validPorts: Map[String, (NodeDigraph, Set[Node])]):
+                                  externalDeps: Map[String, (NodeDigraph, Set[Node])]):
   (Map[String, (NodeDigraph, Set[Node])], Set[CandidateVec]) = {
     val scoreboard = new Scoreboard
     val internalDeps = new NodeDigraph
@@ -252,7 +252,7 @@ object CandidateVecFinder {
     val portNodes = currentModule.ports.flatMap(p => getNodes(p.name, p.tpe)).toSet
     portNodes.foreach(internalDeps.addNode)
 
-    currentModule.mapStmt(getStmtDeps(internalDeps, scoreboard, validPorts, Seq.empty))
+    currentModule.mapStmt(getStmtDeps(internalDeps, scoreboard, externalDeps, Seq.empty))
 
     val validCandidates = scoreboard.getValidCandidates
     val portDiGraph = internalDeps.getSubgraph(portNodes)
@@ -260,29 +260,29 @@ object CandidateVecFinder {
     val candidateGraph = internalDeps.getSubgraph(validCandidates.map(_.toNode)).toDigraph
     val sccs = candidateGraph.findSCCs.filter(_.length > 1)
     if (sccs.nonEmpty | candidateGraph.getEdgeMap.exists { case (k, v) => v.contains(k) }) {
-      val empties = scoreboard.getCandidates.flatMap(_.module).collect {
-        case moduleName if validPorts.contains(moduleName) =>
-          moduleName -> validPorts(moduleName).copy(_2 = Set.empty[Node])
+      val empties = scoreboard.getCandidates.flatMap(_.module).flatMap { modName =>
+        externalDeps.get(modName).map(modName -> _.copy(_2 = Set.empty[Node]))
       }
-      (validPorts ++ empties + (currentModule.name -> (portDiGraph, Set.empty[Node])), Set.empty)
+      (externalDeps ++ empties + (currentModule.name -> (portDiGraph, Set.empty[Node])), Set.empty)
     } else {
-
       val updatedPorts = scoreboard.getCandidates
-        .filter(_.module.exists(_ != currentModule.name))
+        .filter(_.module.exists(externalDeps.contains))
         .groupBy(_.module.get)
-        .collect { case (k, v) =>
-          val commonCandidates = v.groupBy(_.name.takeWhile(_ != '.')).values.map { candidates =>
-            candidates.collect { case candidate if validCandidates.contains(candidate) =>
+        .map { case (modName, instCandidates) =>
+          val commonCandidates = instCandidates
+            .groupBy(_.name.takeWhile(_ != fieldDelimiter))
+            .values.map { candidates =>
+            (candidates & validCandidates).map { candidate =>
               val pathName = candidate.name.split(fieldDelimiter).tail.mkString(fieldDelimiter.toString)
               Node(pathName, candidate.tpe)
             }
           }.reduce(_ & _)
-          k -> validPorts(k).copy(_2 = validPorts(k)._2 & commonCandidates)
+          modName -> externalDeps(modName).copy(_2 = externalDeps(modName)._2 & commonCandidates)
         }
 
       val currentModulePorts = currentModule.name -> (portDiGraph, (validCandidates & portCandidates).map(_.toNode))
 
-      (validPorts ++ updatedPorts + currentModulePorts, validCandidates)
+      (externalDeps ++ updatedPorts + currentModulePorts, validCandidates)
     }
   }
 

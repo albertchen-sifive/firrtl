@@ -10,7 +10,7 @@ import firrtl.transforms.CandidateVecFinder.CandidateVec
 
 import scala.collection.mutable
 
-object ReplaceVecOfBools {
+class VecOfBoolsReplacer {
   private val candidates = new mutable.HashMap[String, (Expression, Boolean)]()
   private val fieldDelimiter = '.'
   private val tempNamePrefix = "_MY_TEMP"
@@ -109,24 +109,24 @@ object ReplaceVecOfBools {
 
   private def onStmt(namespace: Namespace)(stmt: Statement): Statement = stmt match {
     case wire: DefWire => wire.mapType(replace(wire.name))
-    case reg @ DefRegister(info, name, origTpe, _, _, origInit) =>
-      val tpex = replace(name)(origTpe)
-      val initx = onExpr(origInit)
-      val regx = reg.copy(tpe = tpex, init = initx)
-      if (tpex != initx.tpe) {
+    case origReg @ DefRegister(info, name, origTpe, _, _, _) =>
+      val replacedTpe = replace(name)(origTpe)
+      val reg = origReg.copy(tpe = replacedTpe).mapExpr(onExpr).asInstanceOf[DefRegister]
 
-        val tempExprName = namespace.newName(tempNamePrefix)
-        val tempNode = DefNode(info, tempExprName, initx)
-        val expr = WRef(tempExprName, initx.tpe, WireKind, UNKNOWNGENDER)
+      if (replacedTpe != reg.init.tpe) {
+        val exprName = namespace.newName(tempNamePrefix)
+        val exprNode = DefNode(info, exprName, reg.init)
+        val expr = WRef(exprName, reg.init.tpe, WireKind, UNKNOWNGENDER)
 
-        val tempLocName = namespace.newName(tempNamePrefix)
-        val loc = WRef(tempLocName, tpex, WireKind, UNKNOWNGENDER)
+        val locName = namespace.newName(tempNamePrefix)
+        val locWire = DefWire(info, locName, replacedTpe)
+        val loc = WRef(locName, replacedTpe, WireKind, UNKNOWNGENDER)
 
         val connects = reconnect(info)(loc, expr)
 
-        Block(tempNode +: DefWire(info, tempLocName, tpex) +: regx.copy(init = loc).mapExpr(onExpr) +: connects)
+        Block(exprNode +: locWire +: reg.copy(init = loc) +: connects)
       } else {
-        regx.mapExpr(onExpr)
+        reg
       }
 
     case node @ DefNode(_, name, origValue) =>
@@ -249,18 +249,16 @@ object ReplaceVecOfBools {
       }
     }
 
-    val outputDefaults = new mutable.ListBuffer[Statement]()
-    val portsx = mod.ports.map { case p @ Port(_, name, _, _) => p.copy(tpe = replace(name)(p.tpe)) }
+    val portsx = mod.ports.map { p => p.copy(tpe = replace(p.name)(p.tpe)) }
     val bodyx = onStmt(namespace)(mod.body)
 
     val finalConnects = candidates.collect {
       case (key, (default, touched)) if touched => Connect(NoInfo, keyToExpr(key), default)
     }.toSeq
 
-    printCandidates
     candidates.clear()
 
-    mod.copy(ports = portsx, body = Block(Block(outputDefaults) +: bodyx +: finalConnects))
+    mod.copy(ports = portsx, body = Block(bodyx +: finalConnects))
   }
 
   private def keyToExpr(name: String): Expression = {
@@ -268,8 +266,6 @@ object ReplaceVecOfBools {
     val bundleRef: Expression = WRef(path.head)
     path.tail.foldLeft(bundleRef)((expr, field) => WSubField(expr, field)).mapType(_ => candidates(name)._1.tpe)
   }
-
-  def printCandidates: Unit = println(candidates.keySet)
 }
 
 /** Replace Vec of Bools
@@ -282,14 +278,14 @@ class ReplaceVecOfBools extends Transform {
 
   def execute(state: CircuitState): CircuitState = {
     val expandedState = ExpandConnects.execute(state)
-    val renamesx = RenameMap()
+    val renamesx = expandedState.renames.getOrElse(RenameMap())
     renamesx.setCircuit(expandedState.circuit.main)
+    val replacer = new VecOfBoolsReplacer
     val candidatesMap = CandidateVecFinder.getCandidateVecs(expandedState.circuit)
     val modulesx = expandedState.circuit.modules.map {
       case mod: Module =>
         val candidates = candidatesMap(mod.name)
         if (candidates.isEmpty) {
-          println("NOT OPTIMIZED: " + mod.name)
           mod
         } else {
           renamesx.setModule(mod.name)
@@ -299,15 +295,13 @@ class ReplaceVecOfBools extends Transform {
             }
           }
 
-          println("optimized vec of bools: " + mod.name)
-          ReplaceVecOfBools.replaceVecOfBools(mod, candidates)
+          replacer.replaceVecOfBools(mod, candidates)
         }
       case ext: ExtModule => ext
     }
 
     val circuitState = expandedState.copy(circuit = expandedState.circuit.copy(modules = modulesx),
       renames = Some(renamesx))
-    //println(circuitState.circuit.serialize)
     circuitState
   }
 }
