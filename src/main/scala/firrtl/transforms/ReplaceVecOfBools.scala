@@ -238,6 +238,7 @@ class VecOfBoolsReplacer {
     * with equivalent bitwise operations.
     *
     * @param mod [[Module]] to transform
+    * @param candidatesx set of candidates to replace
     * @return [[Module]] with bool vecs replaced
     */
   def replaceVecOfBools(mod: Module, candidatesx: Set[CandidateVec]): DefModule = {

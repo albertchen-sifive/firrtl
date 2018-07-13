@@ -8,16 +8,12 @@ circuit testCombLoop:
     output outVec: UInt<1>[8]
     output copy: UInt<1>[8]
 
-    wire dummy: UInt<1>
     copy <= boolVec
     selected <= boolVec[select]
-    dummy <= boolVec[boolVec[select]]
     copy[5] <= boolVec[select]
     copy[1] <= copy[5]
     copy[5] <= setVal
     copy[select] <= boolVec[select]
-
-    dummy <= dummy
 
     outVec <= boolVec
     outVec[0] <= setVal

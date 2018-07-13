@@ -14,19 +14,76 @@ import scala.io.Source
 import firrtl._
 import firrtl.ir._
 import firrtl.Parser.UseInfo
+import firrtl.analyses.InstanceGraph
 import firrtl.annotations._
-import firrtl.transforms.{DontTouchAnnotation, GetNamespace, NoDedupAnnotation, RenameModules}
+import firrtl.transforms.{DontTouchAnnotation, NoDedupAnnotation}
 import firrtl.util.BackendCompilationUtilities
+
+import scala.collection.mutable
 
 trait FirrtlRunners extends BackendCompilationUtilities {
 
   val cppHarnessResourceName: String = "/firrtl/testTop.cpp"
 
+  /** Rename Modules
+    *
+    * using namespace created by GetNamespace, create unique names for modules
+    */
+  private class RenameModules(namespace: Namespace, newTopName: String) extends Transform {
+    def inputForm: LowForm.type = LowForm
+    def outputForm: LowForm.type = LowForm
+
+    def collectNameMapping(namespace: Namespace, moduleNameMap: mutable.HashMap[String, String])
+                          (mod: DefModule): Unit = {
+      val newName = namespace.newName(mod.name)
+      moduleNameMap.put(mod.name, newName)
+    }
+
+    def onStmt(moduleNameMap: mutable.HashMap[String, String])
+              (stmt: Statement): Statement = stmt match {
+      case inst: WDefInstance if moduleNameMap.contains(inst.module) => inst.copy(module = moduleNameMap(inst.module))
+      case other => other.mapStmt(onStmt(moduleNameMap))
+    }
+
+    def execute(state: CircuitState): CircuitState = {
+      val moduleOrder = new InstanceGraph(state.circuit).moduleOrder.reverse
+      val nameMappings = new mutable.HashMap[String, String]()
+      moduleOrder.foreach(collectNameMapping(namespace, nameMappings))
+
+      val modulesx = state.circuit.modules.map {
+        case mod: Module if mod.name == state.circuit.main => mod.copy(name = newTopName).mapStmt(onStmt(nameMappings))
+        case mod: Module => mod.mapStmt(onStmt(nameMappings)).mapString(nameMappings)
+        case ext: ExtModule => ext
+      }
+
+      val newState = state.copy(circuit = state.circuit.copy(modules = modulesx, main = newTopName))
+      newState
+    }
+  }
+
+  /** Create a namespace with this circuit
+    *
+    * namespace is used by RenameModules to get unique names
+    */
+  private class GetNamespace extends Transform {
+    var namespace: Option[Namespace] = Option.empty
+    var newTopName: Option[String] = Option.empty
+
+    def inputForm: LowForm.type = LowForm
+    def outputForm: LowForm.type = LowForm
+
+    def execute(state: CircuitState): CircuitState = {
+      namespace = Some(Namespace(state.circuit))
+      newTopName = namespace.map(_.newName(state.circuit.main))
+      state
+    }
+  }
   /** Compile a Firrtl file
     *
     * @param prefix is the name of the Firrtl file without path or file extension
     * @param srcDir directory where all Resources for this test are located
     * @param customAnnotations Optional Firrtl annotations
+    * @param resets tell yosys which signals to set for SAT, format is (timestep, signal, value)
     */
   def firrtlEquivalenceTest(prefix: String,
                             srcDir: String,
@@ -280,4 +337,3 @@ abstract class EquivalenceTest(name: String,
     firrtlEquivalenceTest(name, dir, customTransforms, resets = resets)
   }
 }
-
