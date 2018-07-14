@@ -97,10 +97,8 @@ object CandidateVecFinder {
 
     def makeConditionalScoreboard(): Scoreboard = {
       val clonedScoreboard = new Scoreboard
-      clonedScoreboard.vecNodes ++= vecNodes
-      vecNodes.foreach { case (c, _) =>
-        val score = clonedScoreboard.vecNodes(c)
-        score.indices.foreach(score(_) = false)
+      vecNodes.foreach { case (c, v) =>
+        clonedScoreboard.vecNodes.put(c, v.clone())
       }
       clonedScoreboard
     }
@@ -111,7 +109,7 @@ object CandidateVecFinder {
 
       val currentKeys = vecNodes.keySet
       for (k <- currentKeys) {
-        vecNodes(k).indices.foreach(i => vecNodes(k)(i) |= conseqVecs(k)(i) && altVecs(k)(i))
+        vecNodes(k).indices.foreach(i => vecNodes(k)(i) |= (conseqVecs(k)(i) && altVecs(k)(i)))
       }
 
       (conseqVecs.keySet &~ currentKeys).foreach(key => vecNodes += key -> conseqVecs(key))

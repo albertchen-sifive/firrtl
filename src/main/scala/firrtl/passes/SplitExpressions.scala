@@ -35,12 +35,26 @@ object SplitExpressions extends Pass {
           case _ => e
         }
 
+        def foldCat(ex: Expression): Expression = {
+          ex.mapExpr(foldCat) match {
+            case e@DoPrim(PrimOps.Cat, args, _, tpe) => (args.head, args(1)) match {
+              case (DoPrim(PrimOps.Bits, args1, params1, _), DoPrim(PrimOps.Bits, args2, params2, _))
+                if (args1.head == args2.head) && (params1(1) == params2.head + 1) =>
+                DoPrim(PrimOps.Bits, args1, Seq(params1.head, params2(1)), tpe)
+              case _ => e
+            }
+            case other => other
+          }
+        }
+
         // Recursive. Splits compound nodes
-        def onExp(e: Expression): Expression =
-          e map onExp match {
+        def splitExp(e: Expression): Expression =
+          e map splitExp match {
             case ex: DoPrim => ex map split
             case ex => ex
          }
+
+        def onExp(e: Expression): Expression = splitExp(foldCat(e))
 
         s map onExp match {
            case x: Block => x map onStmt

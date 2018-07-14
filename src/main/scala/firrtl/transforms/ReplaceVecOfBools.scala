@@ -62,39 +62,13 @@ class VecOfBoolsReplacer {
     assignVec(info, namespace, vec, DoPrim(PrimOps.Or, Seq(maskedDefault, shiftedValue), Seq.empty, tpe))
   }
 
-  private def replaceIndex(namespace: Namespace,
-                           info: Info,
-                           vec: Expression,
-                           index: Int,
-                           default: Expression,
-                           valuex: Expression,
-                           tpe: Type): Statement = {
-
-    val value = valuex.mapType(_ => BoolType)
-    val UIntType(IntWidth(width)) = default.tpe
-
-    val upperBits = DoPrim(PrimOps.Bits, Seq(default), Seq(width - 1, index + 1), UIntType(IntWidth(width - index - 1)))
-    val lowerBits = DoPrim(PrimOps.Bits, Seq(default), Seq(index - 1, 0), UIntType(IntWidth(index)))
-
-    val newValue = if (width == 1) {
-      value
-    } else if (index == 0) {
-      DoPrim(PrimOps.Cat, Seq(upperBits, value), Seq.empty, default.tpe)
-    } else if (index == (width - 1)) {
-      DoPrim(PrimOps.Cat, Seq(value, lowerBits), Seq.empty, default.tpe)
-    } else {
-      DoPrim(PrimOps.Cat,
-        Seq(upperBits, DoPrim(PrimOps.Cat, Seq(value, lowerBits), Seq.empty, UIntType(IntWidth(index + 1)))),
-        Seq.empty,
-        default.tpe)
-    }
-
-    assignVec(info, namespace, vec, newValue)
-  }
-
   private def reconnect(info: Info)(loc: Expression, expr: Expression): Seq[Statement] = {
     (loc.tpe, expr.tpe) match {
       case (g: GroundType, v: VectorType) => Seq(Connect(info, loc, vecToUInt(expr)))
+      case (VectorType(BoolType, size), g: GroundType) =>
+        val connects = (0 until size).map(
+          i => Connect(info, SubIndex(loc, i, BoolType), onExpr(SubIndex(expr, i, BoolType))))
+        connects
       case (VectorType(tpe, size), VectorType(_, _)) =>
         (0 until size).map { i =>
           Connect(info, WSubIndex(loc, i, tpe, UNKNOWNGENDER), WSubIndex(expr, i, tpe, UNKNOWNGENDER))
@@ -107,7 +81,25 @@ class VecOfBoolsReplacer {
     }
   }
 
-  private def onStmt(namespace: Namespace)(stmt: Statement): Statement = stmt match {
+  private def assignSubIndices(namespace: Namespace,
+                               assignments: Map[Expression, Seq[Option[Expression]]]): Seq[Statement] = {
+    assignments.map { case (loc, exprs) =>
+      val default = getDefault(loc)
+      val value = exprs.foldLeft((EmptyExpression: Expression, 0)) {
+        case ((_, 0), currExpr) => (currExpr.getOrElse(DoPrim(PrimOps.Bits, Seq(default), Seq(0, 0), BoolType)), 1)
+        case ((prevExpr, idx), currExpr) =>
+          (DoPrim(PrimOps.Cat,
+            Seq(currExpr.getOrElse(DoPrim(PrimOps.Bits, Seq(default), Seq(idx, idx), BoolType)), prevExpr),
+            Seq.empty,
+            UIntType(IntWidth(idx + 1))), idx + 1)
+      }._1
+      assignVec(NoInfo, namespace, loc, value)
+    }.toSeq
+  }
+
+  private def onStmt(namespace: Namespace,
+                     pendingSubIndexConnects: mutable.HashMap[Expression, mutable.ArraySeq[Option[Expression]]])
+                    (stmt: Statement): Statement = stmt match {
     case wire: DefWire => wire.mapType(replace(wire.name))
     case origReg @ DefRegister(info, name, origTpe, _, _, _) =>
       val replacedTpe = replace(name)(origTpe)
@@ -137,31 +129,40 @@ class VecOfBoolsReplacer {
         node.copy(value = valuex)
       }
 
-    case Connect(info, WSubIndex(vec, index, _, _), origValue) if isReplaced(vec) =>
-      val default = getDefault(vec)
-      val value = onExpr(origValue)
-      replaceIndex(namespace, info, vec, index, default, value, default.tpe)
+    case Connect(_, WSubIndex(vec, index, _, _), origValue) if isReplaced(vec) =>
+
+      val subIndexValues = pendingSubIndexConnects.getOrElseUpdate(onExpr(vec), {
+        val size = vec.tpe.asInstanceOf[VectorType].size
+        val values = new mutable.ArraySeq[Option[Expression]](size)
+        (0 until size).foreach(values(_) = Option.empty)
+        values
+      })
+      subIndexValues(index) = Some(onExpr(origValue))
+      EmptyStmt
 
     case Connect(info, WSubAccess(vec, origIndex, _, _), origValue) if isReplaced(vec) =>
+      val subIndexAsignments = assignSubIndices(namespace, pendingSubIndexConnects.toMap)
+      pendingSubIndexConnects.clear()
+
       val default = getDefault(vec)
       val value = onExpr(origValue)
       val index = onExpr(origIndex)
-      replaceAccess(namespace, info, vec, default, value, index, default.tpe)
+      val subAccessAssignment = replaceAccess(namespace, info, vec, default, value, index, default.tpe)
+      Block(subIndexAsignments :+ subAccessAssignment)
 
     case Connect(info, origExpr, origValue) if isReplaced(origExpr) =>
       val value = onExpr(origValue)
       val expr = onExpr(origExpr)
       assignVec(info, namespace, expr, vecToUInt(value))
 
-    case Connect(info, expr, value) if isReplaced(value) =>
-      val VectorType(BoolType, size) = expr.tpe.asInstanceOf[VectorType]
-      val connects = (0 until size).map(
-        i => Connect(info, SubIndex(expr, i, BoolType), onExpr(SubIndex(value, i, BoolType))))
-      Block(connects)
+    case Connect(info, expr, value) => Block(reconnect(info)(onExpr(expr), onExpr(value)))
 
     case wDefInstance: WDefInstance => wDefInstance.mapType(replace(wDefInstance.name))
 
     case Conditionally(info, origCond, origConseq, origAlt) =>
+      val subIndexAsignments = assignSubIndices(namespace, pendingSubIndexConnects.toMap)
+      pendingSubIndexConnects.clear()
+
       val prevDefaults = candidates.clone()
       val cond = onExpr(origCond)
 
@@ -181,14 +182,17 @@ class VecOfBoolsReplacer {
       candidates.foreach { case (k, (e, _)) => candidates.put(k, (e, false)) }
 
       // map conseq with new defaults, reassign newly created wires
-      val partialConseq = Seq(onStmt(namespace)(origConseq))
-      val conseq = Block(partialConseq ++ conditionalDefaults.collect {
-        case (name, (default, _)) if candidates(name)._2 =>
-          conditionalDefaults.put(name, (default, true))
-          Connect(info, default, candidates(name)._1)
-      })
+      val partialConseq = Seq(onStmt(namespace, pendingSubIndexConnects)(origConseq))
+      val conseq = Block(partialConseq ++
+        assignSubIndices(namespace, pendingSubIndexConnects.toMap) ++
+        conditionalDefaults.collect {
+          case (name, (default, _)) if candidates(name)._2 =>
+            conditionalDefaults.put(name, (default, true))
+            Connect(info, default, candidates(name)._1)
+        })
 
       // reset defaults and flags
+      pendingSubIndexConnects.clear()
       candidates ++= prevDefaults
       candidates.foreach{ case (k, (e, _)) => candidates.put(k, (e, false))}
 
@@ -196,13 +200,16 @@ class VecOfBoolsReplacer {
       val alt = origAlt match {
         case EmptyStmt => origAlt
         case _ =>
-          val partialAlt = Seq(onStmt(namespace)(origAlt))
-          Block(partialAlt ++ conditionalDefaults.collect {
-            case (name, (default, _)) if candidates(name)._2 =>
-              conditionalDefaults.put(name, (default, true))
-              Connect(info, default, candidates(name)._1)
-          })
+          val partialAlt = Seq(onStmt(namespace, pendingSubIndexConnects)(origAlt))
+          Block(partialAlt ++
+            assignSubIndices(namespace, pendingSubIndexConnects.toMap) ++
+            conditionalDefaults.collect {
+              case (name, (default, _)) if candidates(name)._2 =>
+                conditionalDefaults.put(name, (default, true))
+                Connect(info, default, candidates(name)._1)
+            })
       }
+      pendingSubIndexConnects.clear()
       candidates ++= prevDefaults
 
       val conditional = Conditionally(info, cond, conseq, alt)
@@ -211,9 +218,9 @@ class VecOfBoolsReplacer {
         case _ =>
       }
 
-      Block(defaults :+ conditional)
+      Block(subIndexAsignments ++: defaults :+ conditional)
 
-    case other => other.mapStmt(onStmt(namespace)).mapExpr(onExpr)
+    case other => other.mapStmt(onStmt(namespace, pendingSubIndexConnects)).mapExpr(onExpr)
   }
 
   private def onExpr(expr: Expression): Expression = expr.mapExpr(onExpr) match {
@@ -251,15 +258,17 @@ class VecOfBoolsReplacer {
     }
 
     val portsx = mod.ports.map { p => p.copy(tpe = replace(p.name)(p.tpe)) }
-    val bodyx = onStmt(namespace)(mod.body)
+    val pendingSubIndexConnects = new mutable.HashMap[Expression, mutable.ArraySeq[Option[Expression]]]()
+    val bodyx = onStmt(namespace, pendingSubIndexConnects)(mod.body)
 
+    val subIndexConnects = assignSubIndices(namespace, pendingSubIndexConnects.toMap)
     val finalConnects = candidates.collect {
       case (key, (default, touched)) if touched => Connect(NoInfo, keyToExpr(key), default)
     }.toSeq
 
     candidates.clear()
 
-    mod.copy(ports = portsx, body = Block(bodyx +: finalConnects))
+    mod.copy(ports = portsx, body = Block(bodyx +: subIndexConnects ++: finalConnects))
   }
 
   private def keyToExpr(name: String): Expression = {
@@ -303,6 +312,7 @@ class ReplaceVecOfBools extends Transform {
 
     val circuitState = expandedState.copy(circuit = expandedState.circuit.copy(modules = modulesx),
       renames = Some(renamesx))
+    //println(circuitState.circuit.serialize)
     circuitState
   }
 }
