@@ -285,6 +285,10 @@ object DedupModules {
     }
     def fastSerializedHash(s: Statement): Int ={
       def serialize(builder: StringBuilder, nindent: Int)(s: Statement): Unit = s match {
+        case custom: CustomStatement =>
+          val x = serialize(builder, nindent)(custom.stmt)
+          builder ++= "\n"
+          x
         case Block(stmts) => stmts.map {
           val x = serialize(builder, nindent)(_)
           builder ++= "\n"

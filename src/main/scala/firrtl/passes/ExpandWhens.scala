@@ -190,6 +190,7 @@ object ExpandWhens extends Pass {
         }
         Block(Seq(conseqStmt, altStmt) ++ memos)
       case block: Block => block map expandWhens(netlist, defaults, p)
+      case custom: CustomStatement => custom map expandWhens(netlist, defaults, p)
       case _ => throwInternalError()
     }
     val netlist = new Netlist

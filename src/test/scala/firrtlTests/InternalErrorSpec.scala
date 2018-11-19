@@ -40,7 +40,7 @@ class InternalErrorSpec extends FreeSpec with Matchers with BackendCompilationUt
 
     "should contain the name of the file originating the exception in the stack trace" in {
       val first = true
-      assert(getThrowable(Some(exception), first).getStackTrace exists (_.getFileName.contains("PrimOps.scala")))
+      assert(getThrowable(Some(exception), first).getStackTrace exists (_.getFileName.contains("IR.scala")))
     }
   }
 }

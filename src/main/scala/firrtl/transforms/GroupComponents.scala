@@ -321,6 +321,7 @@ class GroupComponents extends firrtl.Transform {
         simulations(simName) = q
         (args :+ clk :+ en) map onExpr(WRef(simName))
       case Block(stmts) => stmts.foreach(onStmt)
+      case custom: CustomStatement => onStmt(custom.stmt)
       case ignore @ (_: IsInvalid | EmptyStmt) => // do nothing
       case other => throw new Exception(s"Unexpected Statement $other")
     }

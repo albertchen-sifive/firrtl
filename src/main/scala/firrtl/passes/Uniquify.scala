@@ -220,6 +220,7 @@ object Uniquify extends Transform {
       case sx: DefNode => Seq(Field(sx.name, Default, sx.value.tpe))
       case sx: Conditionally => recStmtToType(sx.conseq) ++ recStmtToType(sx.alt)
       case sx: Block => (sx.stmts map recStmtToType).flatten
+      case sx: CustomStatement => recStmtToType(sx.stmt)
       case sx => Seq()
     }
     BundleType(recStmtToType(s))

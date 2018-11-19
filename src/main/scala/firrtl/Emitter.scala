@@ -116,14 +116,14 @@ class HighFirrtlEmitter extends FirrtlEmitter(HighForm)
 class MiddleFirrtlEmitter extends FirrtlEmitter(MidForm)
 class LowFirrtlEmitter extends FirrtlEmitter(LowForm)
 
-case class VRandom(width: BigInt) extends Expression {
+case class VRandom(width: BigInt) extends CustomExpression {
+  def expr = EmptyExpression
   def tpe = UIntType(IntWidth(width))
   def nWords = (width + 31) / 32
   def realWidth = nWords * 32
+  def id = s"RANDOM: $width"
+  def update(newExpr: Expression): Expression = this
   def serialize: String = "RANDOM"
-  def mapExpr(f: Expression => Expression): Expression = this
-  def mapType(f: Type => Type): Expression = this
-  def mapWidth(f: Width => Width): Expression = this
 }
 
 class VerilogEmitter extends SeqTransform with Emitter {

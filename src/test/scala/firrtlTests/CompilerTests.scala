@@ -32,6 +32,7 @@ abstract class CompilerSpec extends FlatSpec {
    def check: String
    def getOutput: String = {
      val res = compiler.compileAndEmit(CircuitState(parse(input), ChirrtlForm))
+     println(res.getEmittedCircuit.value)
      res.getEmittedCircuit.value
    }
 }

@@ -44,6 +44,7 @@ object SplitExpressions extends Pass {
 
         s map onExp match {
            case x: Block => x map onStmt
+           case x: CustomStatement => onStmt(x.stmt)
            case EmptyStmt => EmptyStmt
            case x =>
              v += x

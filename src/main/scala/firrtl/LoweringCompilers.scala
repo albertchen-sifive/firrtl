@@ -14,7 +14,8 @@ class ChirrtlToHighFirrtl extends CoreTransform {
     passes.CheckChirrtl,
     passes.CInferTypes,
     passes.CInferMDir,
-    passes.RemoveCHIRRTL)
+    passes.RemoveCHIRRTL,
+    new firrtl.transforms.CustomizeTransform)
 }
 
 /** Converts from the bare intermediate representation (ir.scala)

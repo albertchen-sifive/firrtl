@@ -136,6 +136,7 @@ class DeadCodeElimination extends Transform with ResolvedAnnotationPaths with Re
       case Print(_, _, args, clk, en) =>
         (args :+ clk :+ en).flatMap(getDeps(_)).foreach(ref => depGraph.addPairWithEdge(circuitSink, ref))
       case Block(stmts) => stmts.foreach(onStmt(_))
+      case custom: CustomStatement => onStmt(custom.stmt)
       case ignore @ (_: IsInvalid | _: WDefInstance | EmptyStmt) => // do nothing
       case other => throw new Exception(s"Unexpected Statement $other")
     }
@@ -240,6 +241,7 @@ class DeadCodeElimination extends Transform with ResolvedAnnotationPaths with Re
           val node = getDeps(expr) match { case Seq(elt) => elt }
           if (deadNodes.contains(node)) EmptyStmt else IsInvalid(info, expr)
         case block: Block => block map onStmt
+        case custom: CustomStatement => custom.map(onStmt)
         case other => other
       }
       stmtx match { // Check if module empty

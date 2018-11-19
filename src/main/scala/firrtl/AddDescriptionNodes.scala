@@ -15,42 +15,6 @@ case class DescriptionAnnotation(named: Named, description: String) extends Anno
   }
 }
 
-private sealed trait HasDescription {
-  def description: Description
-}
-
-private abstract class Description extends FirrtlNode
-
-private case class DocString(string: StringLit) extends Description {
-  def serialize: String = "@[" + string.serialize + "]"
-}
-
-private case object EmptyDescription extends Description {
-  def serialize: String = ""
-}
-
-private case class DescribedStmt(description: Description, stmt: Statement) extends Statement with HasDescription {
-  def serialize: String = s"${description.serialize}\n${stmt.serialize}"
-  def mapStmt(f: Statement => Statement): Statement = f(stmt)
-  def mapExpr(f: Expression => Expression): Statement = this.copy(stmt = stmt.mapExpr(f))
-  def mapType(f: Type => Type): Statement = this.copy(stmt = stmt.mapType(f))
-  def mapString(f: String => String): Statement = this.copy(stmt = stmt.mapString(f))
-  def mapInfo(f: Info => Info): Statement = this.copy(stmt = stmt.mapInfo(f))
-}
-
-private case class DescribedMod(description: Description,
-  portDescriptions: Map[String, Description],
-  mod: DefModule) extends DefModule with HasDescription {
-  val info = mod.info
-  val name = mod.name
-  val ports = mod.ports
-  def serialize: String = s"${description.serialize}\n${mod.serialize}"
-  def mapStmt(f: Statement => Statement): DefModule = this.copy(mod = mod.mapStmt(f))
-  def mapPort(f: Port => Port): DefModule = this.copy(mod = mod.mapPort(f))
-  def mapString(f: String => String): DefModule = this.copy(mod = mod.mapString(f))
-  def mapInfo(f: Info => Info): DefModule = this.copy(mod = mod.mapInfo(f))
-}
-
 /** Wraps modules or statements with their respective described nodes.
   * Descriptions come from [[DescriptionAnnotation]]. Describing a
   * module or any of its ports will turn it into a [[DescribedMod]].

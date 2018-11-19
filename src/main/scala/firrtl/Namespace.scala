@@ -58,6 +58,7 @@ object Namespace {
       case s: IsDeclaration => Seq(s.name)
       case s: Conditionally => buildNamespaceStmt(s.conseq) ++ buildNamespaceStmt(s.alt)
       case s: Block => s.stmts flatMap buildNamespaceStmt
+      case s: CustomStatement => buildNamespaceStmt(s.stmt)
       case _ => Nil
     }
     namespace.namespace ++= m.ports map (_.name)

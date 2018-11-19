@@ -79,6 +79,7 @@ class Flatten extends Transform {
 
        def dupMod(x: Statement): Statement = x match {
          case _: Block => x map dupMod
+         case custom: CustomStatement => dupMod(custom.stmt)
          case WDefInstance(info, instName, moduleName, instTpe) =>
            val newModName = if (replMods.contains(moduleName)) replMods(moduleName) else nsp.newName(moduleName+"_TO_FLATTEN")
            replMods += moduleName -> newModName
