@@ -202,11 +202,11 @@ class InlineInstances extends Transform with RegisteredTransform {
     }
 
     def onStmt(currentModule: IsModule, renames: RenameMap)(s: Statement): Statement = {
-      val ns = namespaceMap.getOrElseUpdate(currentModule.module, Namespace(iGraph.moduleMap(currentModule.module)))
       val currentModuleName = currentModule match {
         case m: ModuleTarget => m.module
         case i: InstanceTarget => i.ofModule
       }
+      val ns = namespaceMap.getOrElseUpdate(currentModuleName, Namespace(iGraph.moduleMap(currentModuleName)))
       val instMap = getInstMap(iGraph.moduleMap(currentModuleName))
       s match {
         case wDef@ WDefInstance(_, instName, modName, _) if flatInstances.contains(s"${currentModuleName}.$instName") =>
