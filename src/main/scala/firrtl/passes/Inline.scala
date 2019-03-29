@@ -155,7 +155,7 @@ class InlineInstances extends Transform with RegisteredTransform {
     def appendNamePrefix(
       instMap: Map[String, String],
       currentModule: IsModule,
-      parentModule: IsModule,
+      parentModule: ModuleTarget,
       prefix: String,
       ns: Namespace,
       renames: RenameMap)(name:String): String = {
@@ -174,7 +174,7 @@ class InlineInstances extends Transform with RegisteredTransform {
     def appendRefPrefix(
       instMap: Map[String, String],
       currentModule: IsModule,
-      parentModule: IsModule,
+      parentModule: ModuleTarget,
       renames: RenameMap)(e: Expression): Expression = e match {
       case wsf@ WSubField(wr@ WRef(ref, _, InstanceKind, _), field, tpe, gen) =>
         val inst = currentModule.instOf(ref, instMap(ref))
@@ -201,7 +201,8 @@ class InlineInstances extends Transform with RegisteredTransform {
       case ex => ex.map(appendRefPrefix(instMap, currentModule, parentModule, renames))
     }
 
-    def onStmt(currentModule: IsModule, renames: RenameMap)(s: Statement): Statement = {
+    val renameMapMap = mutable.HashMap.empty[ModuleTarget, RenameMap]
+    def onStmt(currentModule: ModuleTarget)(s: Statement): Statement = {
       val currentModuleName = currentModule match {
         case m: ModuleTarget => m.module
         case i: InstanceTarget => i.ofModule
@@ -217,9 +218,9 @@ class InlineInstances extends Transform with RegisteredTransform {
 
           val ports = toInline.ports.map(p => DefWire(p.info, p.name, p.tpe))
 
-          val subRenames = RenameMap()
           val currentInst = currentModule.instOf(instName, modName)
-          val bodyx = Block(ports :+ toInline.body) map onStmt(currentInst, subRenames)
+          val bodyx = Block(ports :+ toInline.body) map onStmt(currentModule.copy(module = modName))
+          val subRenames = renameMapMap.getOrElse(currentModule.copy(module = modName), RenameMap())
 
           val names = "" +: Uniquify
             .enumerateNames(Uniquify.stmtToType(bodyx)(NoInfo, ""))
@@ -232,9 +233,9 @@ class InlineInstances extends Transform with RegisteredTransform {
             */
           val safePrefix = Uniquify.findValidPrefix(instName + inlineDelim, names, ns.cloneUnderlying - instName)
 
-          renames.delete(currentModule.instOf(instName, modName))
+          //renames.delete(currentModule.instOf(instName, modName))
 
-          val subSubRenames = RenameMap()
+          val subSubRenames = renameMapMap.getOrElse(currentModule, RenameMap())
           def recName(s: Statement): Statement = s.map(recName).map(appendNamePrefix(getInstMapBody(bodyx), currentInst, currentModule, safePrefix, ns, subSubRenames))
           def recRef(s: Statement): Statement = s.map(recRef).map(appendRefPrefix(getInstMapBody(bodyx), currentInst, currentModule, subSubRenames))
 
@@ -242,37 +243,38 @@ class InlineInstances extends Transform with RegisteredTransform {
             .map(recName)
             .map(recRef)
 
-          val seen = mutable.HashSet.empty[IsComponent]
-          subRenames.underlying.foreach { case (from: IsComponent, tos) =>
-            tos.foreach { case to: IsComponent =>
-              seen += to
-              subSubRenames.get(to).getOrElse(Seq(to)).foreach { case f: IsComponent =>
-                renames.record(from, f)
-              }
-            }
+          val finalRenameMap = subRenames.nextRenameMap ++ subSubRenames
+          renameMapMap += (currentModule -> finalRenameMap)
+          println(currentModule.serialize)
+          subRenames.underlying.foreach { case (from, to) =>
+            println(s"sub ${from.serialize} -> ${to.map(_.serialize)}")
           }
-          subSubRenames.underlying.foreach {
-            case (from: IsComponent, tos) if !seen.contains(from) =>
-              subSubRenames.get(from).foreach(_.foreach { to =>
-                renames.record(from, to)
-              })
-            case _ =>
+          subSubRenames.underlying.foreach { case (from, to) =>
+            println(s"subsub ${from.serialize} -> ${to.map(_.serialize)}")
           }
+          println()
 
           renamedBody
-        case sx => sx
-            .map(appendRefPrefix(instMap, currentModule, currentModule, renames))
-            .map(onStmt(currentModule, renames))
+        case sx =>
+          val renames = renameMapMap.getOrElse(currentModule, RenameMap())
+          sx
+          .map(appendRefPrefix(instMap, currentModule, currentModule, renames))
+          .map(onStmt(currentModule))
       }
     }
 
-    val renames = RenameMap()
-    renames.setCircuit(c.main)
     val flatCircuit = c.copy(modules = c.modules.flatMap {
       case m if flatModules.contains(m.name) => None
-      case m                                 => Some(m.map(onStmt(ModuleName(m.name, CircuitName(c.main)), renames)))
+      case m                                 => Some(m.map(onStmt(ModuleName(m.name, CircuitName(c.main)))))
     })
 
-    CircuitState(flatCircuit, LowForm, annos, Some(renames))
+    //val renames = flatModules.foldLeft(RenameMap()) { case (prevMap, flatMod) =>
+    //  prevMap ++ renameMapMap(ModuleTarget(c.main, flatMod))
+    //}
+    val renames = iGraph.moduleOrder.collectFirst {
+      case m if renameMapMap.contains(ModuleTarget(c.main, m.name)) =>
+        renameMapMap(ModuleTarget(c.main, m.name))
+    }
+    CircuitState(flatCircuit, LowForm, annos, renames)
   }
 }

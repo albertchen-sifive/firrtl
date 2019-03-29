@@ -161,6 +161,7 @@ class FlattenTests extends LowTransformSpec {
           |    b <= a""".stripMargin
      execute(input, check, Seq(flatten("Top.i")))
   }
+    Logger.setLevel(this.getClass, Debug)
   "The module Inline1" should "be inlined" in {
     val input =
         """circuit Top :
