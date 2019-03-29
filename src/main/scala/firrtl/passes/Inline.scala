@@ -182,7 +182,8 @@ class InlineInstances extends Transform with RegisteredTransform {
         (renames.get(port), renames.get(inst)) match {
           case (Some(Seq(p)), _)              =>
             p match {
-              case ref@ ReferenceTarget(_, _, p, r, Nil) if ref.asPath == parentModule.asPath => WRef(r, tpe, WireKind, gen)
+              case ref@ ReferenceTarget(_, _, p, r, Nil) if ref.asPath == parentModule.asPath =>
+                WRef(r, tpe, WireKind, gen)
               case ref@ ReferenceTarget(_, _, p, f, Nil) if ref.asPath.dropRight(1) == parentModule.asPath =>
                 val (TargetToken.Instance(r), _) = p.last
                 wsf.copy(expr = wr.copy(name = r), name = f)
@@ -236,8 +237,12 @@ class InlineInstances extends Transform with RegisteredTransform {
           //renames.delete(currentModule.instOf(instName, modName))
 
           val subSubRenames = renameMapMap.getOrElse(currentModule, RenameMap())
-          def recName(s: Statement): Statement = s.map(recName).map(appendNamePrefix(getInstMapBody(bodyx), currentInst, currentModule, safePrefix, ns, subSubRenames))
-          def recRef(s: Statement): Statement = s.map(recRef).map(appendRefPrefix(getInstMapBody(bodyx), currentInst, currentModule, subSubRenames))
+          def recName(s: Statement): Statement = s.map(recName).map(
+            appendNamePrefix(getInstMapBody(bodyx), currentInst, currentModule, safePrefix, ns, subSubRenames)
+          )
+          def recRef(s: Statement): Statement = s.map(recRef).map(
+            appendRefPrefix(getInstMapBody(bodyx), currentInst, currentModule, subSubRenames)
+          )
 
           val renamedBody = bodyx
             .map(recName)
