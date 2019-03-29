@@ -245,15 +245,6 @@ class InlineInstances extends Transform with RegisteredTransform {
 
           val finalRenameMap = subRenames.nextRenameMap ++ subSubRenames
           renameMapMap += (currentModule -> finalRenameMap)
-          println(currentModule.serialize)
-          subRenames.underlying.foreach { case (from, to) =>
-            println(s"sub ${from.serialize} -> ${to.map(_.serialize)}")
-          }
-          subSubRenames.underlying.foreach { case (from, to) =>
-            println(s"subsub ${from.serialize} -> ${to.map(_.serialize)}")
-          }
-          println()
-
           renamedBody
         case sx =>
           val renames = renameMapMap.getOrElse(currentModule, RenameMap())
@@ -268,13 +259,9 @@ class InlineInstances extends Transform with RegisteredTransform {
       case m                                 => Some(m.map(onStmt(ModuleName(m.name, CircuitName(c.main)))))
     })
 
-    //val renames = flatModules.foldLeft(RenameMap()) { case (prevMap, flatMod) =>
-    //  prevMap ++ renameMapMap(ModuleTarget(c.main, flatMod))
-    //}
-    val renames = iGraph.moduleOrder.collectFirst {
-      case m if renameMapMap.contains(ModuleTarget(c.main, m.name)) =>
-        renameMapMap(ModuleTarget(c.main, m.name))
+    val renames = c.modules.foldLeft(RenameMap()) { case (prevMap, flatMod) =>
+      renameMapMap.get(ModuleTarget(c.main, flatMod.name)).map(prevMap ++ _).getOrElse(prevMap)
     }
-    CircuitState(flatCircuit, LowForm, annos, renames)
+    CircuitState(flatCircuit, LowForm, annos, Some(renames))
   }
 }
