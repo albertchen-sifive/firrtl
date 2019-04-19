@@ -27,7 +27,7 @@ class InlineInstancesTests extends LowTransformSpec {
     InlineAnnotation(name)
   }
    // Set this to debug, this will apply to all tests
-    Logger.setLevel(this.getClass, Debug)
+   // Logger.setLevel(this.getClass, Debug)
    "The module Inline" should "be inlined" in {
       val input =
          """circuit Top :
