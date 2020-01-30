@@ -276,6 +276,7 @@ primop
   | 'shl('
   | 'shr('
   | 'dshl('
+  | 'dshlw('
   | 'dshr('
   | 'cvt('
   | 'neg('

@@ -191,20 +191,6 @@ case object Subw extends PrimOp {
     }
   }
 }
-// Resultant width is the same as input argument width
-case object Dshlw extends PrimOp {
-  override def toString = "dshlw"
-
-  import PrimOps._
-
-  override def propagateType(e: DoPrim): Type = {
-    e.args(0).tpe match {
-      case _: UIntType => UIntType(w1(e))
-      case _: SIntType => SIntType(w1(e))
-      case _ => UnknownType
-    }
-  }
-}
 
 object WrappedExpression {
   def apply(e: Expression) = new WrappedExpression(e)
