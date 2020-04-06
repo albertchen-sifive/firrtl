@@ -206,6 +206,20 @@ object PrimOps extends LazyLogging {
     }
     override def toString = "dshl"
   }
+
+  // Resultant width is the same as input argument width
+  case object Dshlw extends PrimOp {
+    override def toString = "dshlw"
+
+    override def propagateType(e: DoPrim): Type = {
+      e.args(0).tpe match {
+        case _: UIntType => UIntType(w1(e))
+        case _: SIntType => SIntType(w1(e))
+        case _ => UnknownType
+      }
+    }
+  }
+
   /** Dynamic Shift Right */
   case object Dshr extends PrimOp {
     override def propagateType(e: DoPrim): Type = t1(e) match {
@@ -479,7 +493,7 @@ object PrimOps extends LazyLogging {
 
   private lazy val builtinPrimOps: Seq[PrimOp] =
     Seq(Add, Sub, Mul, Div, Rem, Lt, Leq, Gt, Geq, Eq, Neq, Pad, AsUInt, AsSInt, AsInterval, AsClock, AsAsyncReset, Shl, Shr,
-        Dshl, Dshr, Neg, Cvt, Not, And, Or, Xor, Andr, Orr, Xorr, Cat, Bits, Head, Tail, AsFixedPoint, IncP, DecP,
+        Dshl, Dshlw, Dshr, Neg, Cvt, Not, And, Or, Xor, Andr, Orr, Xorr, Cat, Bits, Head, Tail, AsFixedPoint, IncP, DecP,
         SetP, Wrap, Clip, Squeeze)
   private lazy val strToPrimOp: Map[String, PrimOp] = {
     builtinPrimOps.map { case op : PrimOp=> op.toString -> op }.toMap

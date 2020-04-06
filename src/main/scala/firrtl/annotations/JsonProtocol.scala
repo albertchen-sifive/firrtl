@@ -94,6 +94,10 @@ object JsonProtocol {
     { case named: CompleteTarget => JString(named.serialize) }
   ))
   // FIRRTL Serializers
+  class GroundTypeSerializer extends CustomSerializer[GroundType](format => (
+    { case JString(s) => Parser.parseType(s).asInstanceOf[GroundType] },
+    { case tpe: GroundType => JString(tpe.serialize) }
+  ))
   class TypeSerializer extends CustomSerializer[Type](format => (
     { case JString(s) => Parser.parseType(s) },
     { case tpe: Type => JString(tpe.serialize) }
@@ -131,7 +135,7 @@ object JsonProtocol {
       new GenericTargetSerializer + new CircuitTargetSerializer + new ModuleTargetSerializer +
       new InstanceTargetSerializer + new ReferenceTargetSerializer + new TransformSerializer  +
       new LoadMemoryFileTypeSerializer + new IsModuleSerializer + new IsMemberSerializer +
-      new CompleteTargetSerializer + new TypeSerializer + new ExpressionSerializer +
+      new CompleteTargetSerializer + new GroundTypeSerializer + new TypeSerializer + new ExpressionSerializer +
       new StatementSerializer + new PortSerializer + new DefModuleSerializer +
       new CircuitSerializer + new InfoSerializer
   }
