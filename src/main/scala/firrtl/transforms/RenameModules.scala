@@ -43,12 +43,25 @@ class RenameModules extends Transform with DependencyAPIMigration with Preserves
       val nameMappings = new mutable.HashMap[String, String]()
       moduleOrder.foreach(collectNameMapping(namespace.get, nameMappings))
 
-      val modulesx = state.circuit.modules.map {
-        case mod: Module => mod.mapStmt(onStmt(nameMappings)).mapString(nameMappings)
-        case ext: ExtModule => ext
-      }
+      val circuit = RenameModules(nameMappings.toMap, state.circuit)
 
-      state.copy(circuit = state.circuit.copy(modules = modulesx, main = nameMappings(state.circuit.main)))
+      state.copy(circuit = circuit)
     }
+  }
+}
+
+object RenameModules {
+  def onStmt(moduleNameMap: Map[String, String])(stmt: Statement): Statement = stmt match {
+    case inst: WDefInstance if moduleNameMap.contains(inst.module) => inst.copy(module = moduleNameMap(inst.module))
+    case other => other.mapStmt(onStmt(moduleNameMap))
+  }
+
+  def apply(nameMappings: Map[String, String], circuit: Circuit): Circuit = {
+    val modules = circuit.modules.map {
+      case mod: Module => mod.mapStmt(onStmt(nameMappings)).mapString(m => nameMappings.getOrElse(m, m))
+      case ext: ExtModule => ext
+    }
+    val main = nameMappings.getOrElse(circuit.main, circuit.main)
+    circuit.copy(main = main, modules = modules)
   }
 }
