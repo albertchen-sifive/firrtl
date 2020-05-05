@@ -84,6 +84,24 @@ object StabilizeModuleNames {
     if (nameMap.values.toSet.size == modules.size) Some(nameMap) else None
   }
 
+  def appendHashCode(originalName: String, hashCode: Int): String = {
+    originalName + "_" + f"${hashCode}%08X"
+  }
+
+  def contentsStructureName(originalName: String)(module: Module): String = {
+    val noNameModule = removeModuleNames(module)
+    appendHashCode(originalName, noNameModule.hashCode)
+  }
+
+  def contentsName(originalName: String)(module: Module): String = {
+    appendHashCode(originalName, removeModuleInfo(module).copy(name = emptyName).hashCode)
+  }
+
+  def exactName(originalName: String)(module: Module): String = originalName
+
+
+  // remove name helpers
+
   def removeTypeNames(tpe: Type): Type = tpe match {
     case g: GroundType => g
     case v: VectorType => v
@@ -95,30 +113,41 @@ object StabilizeModuleNames {
   def removeStatementNames(stmt: Statement): Statement = stmt match {
     case i: DefInstance => i.copy(
       name = emptyName,
-      module = emptyName)
+      module = emptyName,
+      info = NoInfo)
     case i: WDefInstance => i.copy(
       name = emptyName,
       module = emptyName,
-      tpe = removeTypeNames(i.tpe))
+      tpe = removeTypeNames(i.tpe),
+      info = NoInfo)
     case _ => stmt
       .mapStmt(removeStatementNames)
       .mapString(_ => emptyName)
+      .mapInfo(_ => NoInfo)
       .mapType(removeTypeNames)
   }
 
-  def appendHashCode(originalName: String, hashCode: Int): String = {
-    originalName + "_" + f"${hashCode}%8X"
-  }
-
   def removePortNames(port: Port): Port = {
-    port.copy(name = emptyName, tpe = removeTypeNames(port.tpe))
+    port.copy(name = emptyName, tpe = removeTypeNames(port.tpe), info = NoInfo)
   }
 
   def removeModuleNames(mod: Module): Module = {
     mod.copy(
       ports = mod.ports.map(removePortNames(_)),
       body = removeStatementNames(mod.body),
-      name = emptyName)
+      name = emptyName,
+      info = NoInfo)
+  }
+
+
+  // remove Info helpers
+
+  def removeStatementInfo(stmt: Statement): Statement = {
+    stmt.mapStmt(removeStatementInfo).mapInfo(_ => NoInfo)
+  }
+
+  def removePortInfo(port: Port): Port = {
+    port.copy(info = NoInfo)
   }
 
   def ioStructureName(originalName: String)(module: Module): String = {
@@ -126,14 +155,10 @@ object StabilizeModuleNames {
      appendHashCode(originalName, noNamePorts.hashCode)
   }
 
-  def contentsStructureName(originalName: String)(module: Module): String = {
-    val noNameModule = removeModuleNames(module)
-    appendHashCode(originalName, noNameModule.hashCode)
+  def removeModuleInfo(mod: Module): Module = {
+    mod.copy(
+      ports = mod.ports.map(removePortInfo(_)),
+      body = removeStatementInfo(mod.body),
+      info = NoInfo)
   }
-
-  def contentsName(originalName: String)(module: Module): String = {
-    appendHashCode(originalName, module.hashCode)
-  }
-
-  def exactName(originalName: String)(module: Module): String = originalName
 }
