@@ -3,6 +3,7 @@ import mill._
 import mill.scalalib._
 import mill.scalalib.publish._
 import mill.modules.Util
+import mill.define.TaskModule
 
 object firrtl extends mill.Cross[firrtlCrossModule]("2.11.12", "2.12.11")
 
@@ -130,4 +131,52 @@ class firrtlCrossModule(crossVersion: String) extends ScalaModule with SbtModule
   )
   // make mill publish sbt compatible package
   def artifactName = "firrtl"
+}
+
+
+object JQFMain extends ScalaModule with SbtModule {
+
+  override def millSourcePath = super.millSourcePath / os.up / "JQF-main"
+
+  def scalaVersion = "2.12.11"
+
+  override def ivyDeps = super.ivyDeps() ++ Agg(
+    ivy"edu.berkeley.cs.jqf:jqf-fuzz:1.4",
+    ivy"edu.berkeley.cs.jqf:jqf-instrument:1.4",
+    ivy"com.github.scopt::scopt:3.7.1",
+  )
+}
+
+object FirrtlFuzzerCrossModule extends ScalaModule with SbtModule {
+
+  def scalaVersion = "2.12.11"
+
+  def moduleDeps = Seq(firrtl("2.12.11"))
+
+  override def millSourcePath = super.millSourcePath / os.up / "fuzzer"
+
+  override def ivyDeps = super.ivyDeps() ++ Agg(
+    ivy"com.pholser:junit-quickcheck-core:0.8",
+    ivy"com.pholser:junit-quickcheck-generators:0.8",
+    ivy"com.novocode:junit-interface:0.11",
+    ivy"edu.berkeley.cs.jqf:jqf-fuzz:1.4",
+  )
+  
+  def scalacPluginIvyDeps = Agg(ivy"com.olegpy::better-monadic-for:0.3.1")
+
+  def jqfFuzz(args: String*) = T.command {
+    val outputDir = T.ctx().dest
+    val classpathElements = runClasspath().map(_.path).mkString(":")
+    val allArgs = Seq("--classpathElements", classpathElements, "--outputDirectory", outputDir.toString) ++ args
+    try mill.eval.Result.Success(mill.modules.Jvm.runSubprocess(
+      "firrtl.fuzzer.JQFFuzz",
+      JQFMain.runClasspath().map(_.path),
+      forkArgs(),
+      forkEnv(),
+      allArgs,
+      workingDir = forkWorkingDir()
+    )) catch { case e: Exception =>
+      mill.eval.Result.Failure("subprocess failed")
+    }
+  }
 }
