@@ -25,3 +25,7 @@ addSbtPlugin("ch.epfl.scala" % "sbt-scalafix" % "0.9.15")
 addSbtPlugin("com.thoughtworks.sbt-api-mappings" % "sbt-api-mappings" % "3.0.0")
 
 libraryDependencies += "com.github.os72" % "protoc-jar" % "3.11.4"
+
+lazy val root = (project in file(".")) dependsOn jqfPlugin
+
+lazy val jqfPlugin = RootProject(file("../JQF-Plugin"))
