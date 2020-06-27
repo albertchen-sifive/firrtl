@@ -100,7 +100,7 @@ object JQFFuzz {
           .unbounded()
           .action((x, c) => c.copy(runTimeout = Some(x)))
     }
-      
+
     parser.parse(args, JQFFuzzOptions()) match {
       case Some(opts) => execute(opts)
       case _ => System.exit(1)

@@ -28,4 +28,7 @@ libraryDependencies += "com.github.os72" % "protoc-jar" % "3.11.4"
 
 lazy val root = (project in file(".")) dependsOn jqfPlugin
 
-lazy val jqfPlugin = RootProject(file("../JQF-Plugin"))
+lazy val jqfPlugin = (project in file("JQFPlugin"))
+  .settings(
+    sbtPlugin := true,
+  )

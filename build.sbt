@@ -194,6 +194,15 @@ lazy val benchmark = (project in file("benchmark"))
     assemblyOutputPath in assembly := file("./utils/bin/firrtl-benchmark.jar")
   )
 
+lazy val jqf = (project in file("jqf"))
+  .settings(
+    libraryDependencies ++= Seq(
+      "edu.berkeley.cs.jqf" % "jqf-fuzz" % "1.4",
+      "edu.berkeley.cs.jqf" % "jqf-instrument" % "1.4",
+      "com.github.scopt" %% "scopt" % "3.7.1",
+    ),
+  )
+
 lazy val fuzzer = (project in file("fuzzer"))
   .enablePlugins(JQFPlugin)
   .dependsOn(firrtl)
@@ -202,8 +211,9 @@ lazy val fuzzer = (project in file("fuzzer"))
     libraryDependencies ++= Seq(
       "com.pholser" % "junit-quickcheck-core" % "0.8",
       "com.pholser" % "junit-quickcheck-generators" % "0.8",
-      "com.novocode" % "junit-interface" % "0.11" % "test",
       "edu.berkeley.cs.jqf" % "jqf-fuzz" % "1.4",
       "com.github.scopt" %% "scopt" % "3.7.1",
     ),
+    jqfProject := jqf,
+    jqfFuzzMainClass := "firrtl.fuzzer.JQFFuzz",
   )

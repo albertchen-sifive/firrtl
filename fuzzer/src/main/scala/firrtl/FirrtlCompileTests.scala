@@ -29,17 +29,15 @@ class FirrtlCompileTests {
 
   @Fuzz
   def compileSingleModule(@From(value = classOf[FirrtlSingleModuleGenerator]) c: Circuit) = {
-    // val (assumption, high) = try {
-    //   (true, highFirrtlCompiler.compile(CircuitState(c, ChirrtlForm, Seq()), Seq()))
-    // } catch {
-    //   case _: firrtl.passes.PassException | _: firrtl.CustomTransformException =>
-    //     (false, null)
-    // }
-    // assumeTrue(assumption)
-    // compile(high)
-    compile(CircuitState(c, ChirrtlForm, Seq()))
+    val (assumption, high) = try {
+      (true, highFirrtlCompiler.compile(CircuitState(c, ChirrtlForm, Seq()), Seq()))
+    } catch {
+      case _: firrtl.passes.PassException | _: firrtl.CustomTransformException =>
+        (false, null)
+    }
+    assumeTrue(assumption)
+    compile(high)
   }
-
 
   // adapted from chisel3.Driver.execute and firrtl.Driver.execute
   def compile(c: CircuitState) = {
