@@ -209,11 +209,11 @@ lazy val jqfRepro = sbt.inputKey[Unit]("")
 
 lazy val testClassAndMethodParser = {
   import sbt.complete.DefaultParsers._
-
-  val testClassName = token(charClass(c => isScalaIDChar(c) || (c == '.')).+.string, "<test class name>")
-  val testMethod = token(charClass(isScalaIDChar).+.string, "<test method name>")
-  val rest = token(any.*.string, "<other args>")
-  (token(Space) ~> (testClassName <~ SpaceClass.+.string) ~ (testMethod <~ SpaceClass.+.string) ~ rest).map {
+  val spaces = SpaceClass.+.string
+  val testClassName = token(Space) ~> token(charClass(c => isScalaIDChar(c) || (c == '.')).+.string, "<test class name>")
+  val testMethod = spaces ~> token(charClass(isScalaIDChar).+.string, "<test method name>")
+  val rest = spaces ~> token(any.*.string, "<other args>")
+  (testClassName ~ testMethod ~ rest).map {
     case ((a, b), c) => (a, b, c)
   }
 }
@@ -236,7 +236,7 @@ lazy val fuzzer = (project in file("fuzzer"))
         s" firrtl.jqf.JQFFuzz " +
         s"--testClassName $testClassName " +
         s"--testMethod $testMethod " +
-        s"--classpathElements $classpath " +
+        s"--classpath $classpath " +
         s"--outputDirectory $outputDir " +
         otherArgs)
     }).evaluated,
@@ -248,7 +248,7 @@ lazy val fuzzer = (project in file("fuzzer"))
         s" firrtl.jqf.JQFRepro " +
         s"--testClassName $testClassName " +
         s"--testMethod $testMethod " +
-        s"--classpathElements $classpath " +
+        s"--classpath $classpath " +
         otherArgs)
     }).evaluated,
   )
