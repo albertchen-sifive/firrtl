@@ -46,6 +46,21 @@ trait GenMonad[G[_]] {
   def widen[A, B >: A](ga: G[A]): G[B]
 
   def identifier(maxLength: Int): G[String]
+
+  def frequency[A](pairs: (Int, A)*): G[A] = {
+    assert(pairs.forall(_._1 > 0))
+    assert(pairs.size >=1 )
+    val total = pairs.map(_._1).sum
+    map(choose(0, total)) { startNum =>
+      var num = startNum
+      var idx = 0
+      while (num > 0) {
+        num - pairs(idx)._1
+        idx -= 1
+      }
+      pairs(idx)._2
+    }
+  }
 }
 
 trait StateGen[S, G[_]] {
