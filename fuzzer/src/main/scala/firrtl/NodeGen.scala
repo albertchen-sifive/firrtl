@@ -4,108 +4,24 @@ import firrtl.ir._
 import firrtl.passes.CheckWidths
 import firrtl.{Namespace, PrimOps, Utils}
 
-import scala.annotation.tailrec
-
-trait ASTGen[A] {
-  def apply(): A
-  def flatMap[B](f: A => ASTGen[B]): ASTGen[B] = ASTGen { f(apply())() }
-  def map[B](f: A => B): ASTGen[B] = ASTGen { f(apply()) }
-  def widen[B >: A]: ASTGen[B] = ASTGen { apply() }
+trait Context[Gen[_]] {
+  def unboundRefs: Set[Reference] // should have type set
+  def decls: Set[IsDeclaration]
+  def maxDepth: Int
+  def withRef(ref: Reference): Context[Gen]
+  def decrementDepth: Context[Gen]
+  def namespace: Namespace
+  def exprGen(tpe: Type): Gen[(Context[Gen], Expression)]
 }
 
-object ASTGen {
-  def apply[T](f: => T): ASTGen[T] = new ASTGen[T] {
-    def apply(): T = f
-  }
-}
-
-
-trait Random {
-  def nextInt(min: Int, max: Int) : Int
-  def oneOf[T](items: Seq[T]) : T
-}
-
-object Random {
-  import com.pholser.junit.quickcheck.random.SourceOfRandomness
-
-  def apply(sor: SourceOfRandomness): Random = new Random {
-    def nextInt(min: Int, max: Int) : Int = sor.nextInt(min, max)
-    def oneOf[T](items: Seq[T]) : T = {
-      val a = scala.collection.JavaConverters.seqAsJavaList(items)
-      sor.choose(a)
-    }
-  }
-}
-
-
-trait GenMonad[G[_]] {
-  def flatMap[A, B](a: G[A])(f: A => G[B]): G[B]
-  def flatten[A](gga: G[G[A]]): G[A]
-  def map[A, B](a: G[A])(f: A => B): G[B]
-  def choose(min: Int, max: Int): G[Int]
-  def oneOf[A](items: A*): G[A]
-  def const[A](c: A): G[A]
-  def widen[A, B >: A](ga: G[A]): G[B]
-
-  def identifier(maxLength: Int): G[String]
-}
-
-object GenMonad {
-  object implicits {
-    implicit def astGenGenMonadInstance(implicit r: Random): GenMonad[ASTGen] = new GenMonad[ASTGen] {
-      type G[T] = ASTGen[T]
-      def flatMap[A, B](a: G[A])(f: A => G[B]): G[B] = a.flatMap(f)
-      def flatten[A](gga: G[G[A]]): G[A] = gga.flatMap(ga => ga)
-      def map[A, B](a: G[A])(f: A => B): G[B] = a.map(f)
-      def choose(min: Int, max: Int): G[Int] = ASTGen {
-        r.nextInt(min, max)
-      }
-      def oneOf[T](items: T*): G[T] = {
-        const(items).map(r.oneOf(_))
-      }
-      def const[T](c: T): G[T] = ASTGen(c)
-      def widen[A, B >: A](ga: G[A]): G[B] = ga.widen[B]
-      private val Alpha : Seq[String] = (('a' to 'z') ++ ('A' to 'Z') ++ Seq('_')).map(_.toString)
-      private val AlphaNum : Seq[String] = Alpha ++ ('0' to '9').map(_.toString)
-      def identifier(maxLength: Int): G[String] = {
-        // (12 Details about Syntax):
-        // > The following characters are allowed in identifiers: upper and lower case letters, digits, and _.
-        // > Identifiers cannot begin with a digit.
-        assert(maxLength >= 1)
-        ASTGen {
-          val len = r.nextInt(1, maxLength)
-          val start = r.oneOf(Alpha)
-          if (len == 1) { start } else {
-            start + (1 until len).map(_ => r.oneOf(AlphaNum)).reduce(_ + _)
-          }
-        }
-      }
-    }
-  }
-
-  def apply[G[_]: GenMonad] = implicitly[GenMonad[G]]
-
-  object syntax {
-    final class GenMonadOps[G[_], A](ga: G[A]) {
-      def flatMap[B](f: A => G[B])(implicit GM: GenMonad[G]): G[B] = {
-        GM.flatMap(ga)(f)
-      }
-      def map[B](f: A => B)(implicit GM: GenMonad[G]): G[B] = {
-        GM.map(ga)(f)
-      }
-      def widen[B >: A](implicit GM: GenMonad[G]): G[B] = {
-        GM.widen[A, B](ga)
-      }
-    }
-    final class GenMonadFlattenOps[G[_], A](gga: G[G[A]]) {
-      def flatten(implicit GM: GenMonad[G]): G[A] = GM.flatten(gga)
-    }
-
-    implicit final def genMonadOps[G[_], A](ga: G[A]): GenMonadOps[G, A] =
-      new GenMonadOps(ga)
-    implicit final def genMonadFlattenOps[G[_], A](gga: G[G[A]]): GenMonadFlattenOps[G, A] =
-      new GenMonadFlattenOps(gga)
-  }
+case class ExprContext(
+  unboundRefs: Set[Reference],
+  decls: Set[IsDeclaration],
+  maxDepth: Int,
+  namespace: Namespace) extends Context[ASTGen] {
+  def withRef(ref: Reference): ExprContext = this.copy(unboundRefs = unboundRefs + ref)
+  def decrementDepth: ExprContext = this.copy(maxDepth = maxDepth - 1)
+  def exprGen(tpe: Type): ASTGen[(Context[ASTGen], Expression)] = ???
 }
 
 object Fuzzers {
@@ -144,15 +60,47 @@ object Fuzzers {
     )
   }
 
-  trait Context {
-    def refs: Set[Reference]
-    def maxDepth: Int
-    def withRef(ref: Reference): Context
-    def decrementDepth: Context
-    def namespace: Namespace
+  def widthOp(width: Width)(op: BigInt => BigInt): Width = width match {
+    case IntWidth(i) => IntWidth(op(i))
+    case UnknownWidth => UnknownWidth
   }
 
-  def binDoPrim[G[_]: GenMonad](ctx0: Context): G[(Context, Expression)] = {
+  def makeBinPrimOpGen[G[_]: GenMonad](
+    primOp: PrimOp,
+    typeFn: Type => G[(Type, Type)],
+    tpe: Type)(ctx0: Context[G]): G[(Context[G], Expression)] = {
+    for {
+      (tpe1, tpe2) <- typeFn(tpe)
+      (ctx1, expr1) <- ctx0.exprGen(tpe1)
+      (ctx2, expr2) <- ctx1.exprGen(tpe2)
+    } yield {
+      ctx2 -> DoPrim(primOp, Seq(expr1, expr2), Seq.empty, tpe)
+    }
+  }
+
+  def genAddPrimOp[G[_]: GenMonad](tpe: Type): Context[G] => G[(Context[G], Expression)] = {
+    def typeFn(tpe: Type): G[(Type, Type)] = tpe match {
+      case UIntType(width) =>
+        val tpe = UIntType(widthOp(width)(_ - 1))
+        GenMonad[G].const(tpe -> tpe)
+      case SIntType(width) =>
+        val tpe = UIntType(widthOp(width)(_ - 1))
+        GenMonad[G].const(tpe -> tpe)
+    }
+    makeBinPrimOpGen(
+      PrimOps.Add, typeFn, tpe)
+  }
+/*
+  def genSubPrimOp[G[_]: GenMonad](tpe: Type): Context[G] => G[(Context[G], Expression)] = {
+    val typeFn = (_: Type) match {
+      case UIntType(width) => UIntType(widthOp(width)(_ - 1))
+      case SIntType(width) => UIntType(widthOp(width)(_ - 1))
+    }
+    makeBinPrimOpGen(
+      PrimOps.Add, typeFn, typeFn, tpe)
+  }*/
+
+  def binDoPrim[G[_]: GenMonad](ctx0: Context[G]): G[(Context[G], Expression)] = {
     for {
       op <- binaryPrimOp
       (ctx1, expr1) <- genExpr(ctx0)
@@ -163,7 +111,7 @@ object Fuzzers {
     }
   }
 
-  def ref[G[_]: GenMonad](ctx0: Context, nameOpt: Option[String] = None): G[(Context, Reference)] = for {
+  def ref[G[_]: GenMonad](ctx0: Context[G], nameOpt: Option[String] = None): G[(Context[G], Reference)] = for {
     width <- GenMonad[G].choose(0, CheckWidths.MaxWidth)
     tpe <- GenMonad[G].oneOf(
       SIntType(IntWidth(BigInt(width))),
@@ -175,15 +123,15 @@ object Fuzzers {
     ctx0.withRef(ref) -> ref
   }
 
-  def leaf[G[_]: GenMonad](ctx0: Context): G[(Context, Expression)] = {
+  def leaf[G[_]: GenMonad](ctx0: Context[G]): G[(Context[G], Expression)] = {
     GenMonad[G].oneOf(
       uintLit.map((e: Expression) => ctx0 -> e),
       sintLit.map((e: Expression) => ctx0 -> e),
-      ref(ctx0).widen[(Context, Expression)]
+      ref(ctx0).widen[(Context[G], Expression)]
     ).flatten
   }
 
-  def genExpr[G[_]: GenMonad](ctx0: Context): G[(Context, Expression)] = {
+  def genExpr[G[_]: GenMonad](ctx0: Context[G]): G[(Context[G], Expression)] = {
     if (ctx0.maxDepth <= 0) {
       leaf(ctx0)
     } else {
@@ -195,15 +143,10 @@ object Fuzzers {
   }
 
 
-  case class Ctx(refs: Set[Reference], maxDepth: Int, namespace: Namespace) extends Context {
-    def withRef(ref: Reference): Context = this.copy(refs = refs + ref)
-    def decrementDepth: Context = this.copy(maxDepth = maxDepth - 1)
-  }
-
-  def exprMod[G[_]: GenMonad](maxDepth: Int): G[(Context, Module)] = {
+  def exprMod[G[_]: GenMonad](ctx0: Context[G]): G[(Context[G], Module)] = {
     for {
-      (ctx0, expr) <- genExpr(Ctx(Set.empty, maxDepth, Namespace()))
-      (ctx1, outputPortRef) <- ref(ctx0, Some("outputPort"))
+      (ctx1, expr) <- genExpr(ctx0)
+      (ctx2, outputPortRef) <- ref(ctx1, Some("outputPort"))
     } yield {
       val outputPort = Port(
         NoInfo,
@@ -214,7 +157,7 @@ object Fuzzers {
       ctx1 -> Module(
         NoInfo,
         "foo",
-        ctx0.refs.map { ref =>
+        ctx1.unboundRefs.map { ref =>
           Port(NoInfo, ref.name, Input, ref.tpe)
         }.toSeq.sortBy(_.name) :+ outputPort,
         Connect(NoInfo, outputPortRef, expr)
@@ -222,8 +165,8 @@ object Fuzzers {
     }
   }
 
-  def exprCircuit[G[_]: GenMonad](maxDepth: Int): G[Circuit] = {
-    exprMod(maxDepth).map { case (_, m) =>
+  def exprCircuit[G[_]: GenMonad](ctx: Context[G]): G[Circuit] = {
+    exprMod(ctx).map { case (_, m) =>
       Circuit(NoInfo, Seq(m), m.name)
     }
   }
@@ -310,9 +253,7 @@ object Fuzzers {
   case class Equals(tpe: Type) extends TypeConstraint
   case class ContainsField(field: String) extends TypeConstraint
   case class ContainsIndex(tpe: Type) extends TypeConstraint
-  */
 
-/*
   def anyExprGen(ctx: Context): ASTGen[Expression] = ???
 
   def mux(ctx0: Context): ASTGen[Mux] = {
@@ -360,5 +301,3 @@ object Fuzzers {
     }
   }
 */
-
-
