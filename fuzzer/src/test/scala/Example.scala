@@ -18,7 +18,7 @@ object FirrtlCompileProperties extends Properties("FirrtlCompile") {
         namespace = Namespace()
       )
 
-      ExpressionGenerator.exprCircuit[ExprContext, Gen].fn(context)
+      ExprGen.exprCircuit[ExprContext, Gen].fn(context)
     }
     val lowFirrtlCompiler = new firrtl.LowFirrtlCompiler()
     Prop.forAll(gen) { case (_, circuit) =>

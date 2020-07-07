@@ -4,7 +4,7 @@ import firrtl.ir._
 import firrtl.passes.CheckWidths
 import firrtl.{Namespace, PrimOps, Utils}
 
-trait ExpressionGenerator[E <: Expression] { self =>
+trait ExprGen[E <: Expression] { self =>
   /** The name of this generator, used for logging
     */
   def name: String
@@ -31,13 +31,13 @@ trait ExpressionGenerator[E <: Expression] { self =>
     */
   def sintGen[S: ExprState, G[_]: GenMonad]: Option[BigInt => StateGen[S, G, E]]
 
-  /** Returns a copy of this [[ExpressionGenerator]] that throws better exceptions
+  /** Returns a copy of this [[ExprGen]] that throws better exceptions
     *
-    * Wraps this [[ExpressionGenerator]]'s functions with a try-catch that will wrap
+    * Wraps this [[ExprGen]]'s functions with a try-catch that will wrap
     * exceptions and record the name of this generator in an
-    * [[ExpressionGenerator.TraceException]].
+    * [[ExprGen.TraceException]].
     */
-  def withTrace: ExpressionGenerator[E] = new ExpressionGenerator[E] {
+  def withTrace: ExprGen[E] = new ExprGen[E] {
     import GenMonad.syntax._
 
     def name = self.name
@@ -51,11 +51,11 @@ trait ExpressionGenerator[E <: Expression] { self =>
           try {
             GenMonad[G].applyGen(stateGen.fn(s))
           } catch {
-            case e: ExpressionGenerator.TraceException if e.trace.size < 10 =>
+            case e: ExprGen.TraceException if e.trace.size < 10 =>
               throw e.copy(trace = s"$name: ${tpe.serialize}" +: e.trace)
             case e: IllegalArgumentException =>
-            // case e if !e.isInstanceOf[ExpressionGenerator.TraceException] =>
-              throw ExpressionGenerator.TraceException(Seq(s"$name: ${tpe.serialize}"), e)
+            // case e if !e.isInstanceOf[ExprGen.TraceException] =>
+              throw ExprGen.TraceException(Seq(s"$name: ${tpe.serialize}"), e)
           }
         )
       }
@@ -79,11 +79,11 @@ trait ExpressionGenerator[E <: Expression] { self =>
 
 /** An Expression Generator that generates [[DoPrim]]s of the given operator
   */
-abstract class DoPrimGen(val primOp: PrimOp) extends ExpressionGenerator[DoPrim] {
+abstract class DoPrimGen(val primOp: PrimOp) extends ExprGen[DoPrim] {
   def name = primOp.serialize
 }
 
-object ExpressionGenerator {
+object ExprGen {
   import GenMonad.syntax._
   private def printStack(e: Throwable): String = {
     val sw = new java.io.StringWriter()
@@ -139,7 +139,7 @@ object ExpressionGenerator {
   }
 
 
-  object ReferenceGen extends ExpressionGenerator[Reference] {
+  object ReferenceGen extends ExprGen[Reference] {
     def name = "Ref"
     def boolUIntGen[S: ExprState, G[_]: GenMonad]: Option[StateGen[S, G, Reference]] = uintGen.map(_(1))
     def uintGen[S: ExprState, G[_]: GenMonad]: Option[BigInt => StateGen[S, G, Reference]] = Some { width =>
@@ -162,7 +162,7 @@ object ExpressionGenerator {
     }
   }
 
-  object LiteralGen extends ExpressionGenerator[Literal] {
+  object LiteralGen extends ExprGen[Literal] {
     def name = "Literal"
     def boolUIntGen[S: ExprState, G[_]: GenMonad]: Option[StateGen[S, G, Literal]] = uintGen.map(_(1))
     def uintGen[S: ExprState, G[_]: GenMonad]: Option[BigInt => StateGen[S, G, Literal]] = Some { width =>

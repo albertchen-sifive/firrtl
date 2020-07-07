@@ -47,9 +47,9 @@ object ExprContext {
     def maxWidth(s: ExprContext): Int = s.maxWidth
 
     def exprGen[G[_]: GenMonad](tpe: Type): StateGen[ExprContext, G, Expression] = {
-      val leafGen: Type => StateGen[ExprContext, G, Expression] = ExpressionGenerator.leafExprGen(_)
+      val leafGen: Type => StateGen[ExprContext, G, Expression] = ExprGen.leafExprGen(_)
       val branchGen: Type => StateGen[ExprContext, G, Expression] = (tpe: Type) => {
-        ExpressionGenerator.recursiveExprGen(tpe).flatMap {
+        ExprGen.recursiveExprGen(tpe).flatMap {
           case None => leafGen(tpe)
           case Some(e) => StateGen.pure(e)
         }
@@ -126,7 +126,7 @@ class FirrtlSingleModuleGenerator extends Generator[Circuit](classOf[Circuit]) {
       namespace = Namespace()
     )
 
-    val (_, circuit) = ExpressionGenerator.exprCircuit[ExprContext, SourceOfRandomnessGen].fn(context)()
+    val (_, circuit) = ExprGen.exprCircuit[ExprContext, SourceOfRandomnessGen].fn(context)()
     circuit
   }
 }
